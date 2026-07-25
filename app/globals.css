@@ -192,3 +192,20 @@ button:disabled { opacity: .55; cursor: not-allowed; transform: none !important;
 .domain-field span { color: var(--muted); font-weight: 700; }
 .site-actions { flex-wrap: wrap; }
 .gjs-frame { background: white !important; }
+
+/* Code editor: keep HTML, CSS, and JavaScript equally accessible. */
+.code-tabs {
+  margin-bottom: 12px;
+}
+
+.code-editor-textarea {
+  min-height: 430px;
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
