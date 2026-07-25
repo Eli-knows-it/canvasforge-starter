@@ -184,3 +184,11 @@ button:disabled { opacity: .55; cursor: not-allowed; transform: none !important;
   .editor-bar { padding: 0 8px; }
   .editor-name { min-width: 100px; width: 130px; }
 }
+
+.floating-error { position: fixed; right: 18px; bottom: 18px; z-index: 150; max-width: 460px; cursor: pointer; }
+.tall { min-height: 330px; }
+.publish-modal { max-width: 620px; }
+.domain-field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; }
+.domain-field span { color: var(--muted); font-weight: 700; }
+.site-actions { flex-wrap: wrap; }
+.gjs-frame { background: white !important; }
