@@ -276,7 +276,7 @@ export function EditorClient() {
       const payload = {
         name: (nameOverride ?? current.name).trim() || 'Untitled website',
         html: htmlDocument.body.innerHTML,
-        css: editor.getCss().replace(EDITOR_ONLY_CSS, ''),
+        css: (editor.getCss() ?? '').replace(EDITOR_ONLY_CSS, ''),
         javascript: javascriptRef.current,
         project_data: null,
         updated_at: new Date().toISOString()
