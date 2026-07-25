@@ -158,12 +158,61 @@ function findZipEntry(
 }
 
 
-function runEditorJavascript(editor: Editor, javascript: string, enabled: boolean) {
+function prepareEditorCanvas(editor: Editor) {
   const frame = editor.Canvas.getFrameEl();
   const documentNode = frame?.contentDocument;
-  if (!documentNode?.body) return;
+  if (!documentNode?.head || !documentNode.body) return;
+
+  let editorStyle = documentNode.querySelector<HTMLStyleElement>('[data-canvasforge-editor-style]');
+  if (!editorStyle) {
+    editorStyle = documentNode.createElement('style');
+    editorStyle.setAttribute('data-canvasforge-editor-style', 'true');
+    editorStyle.textContent = `
+      /* Show the completed design while keeping the canvas editable. */
+      .page-loader,
+      [class*="page-loader"],
+      [id*="page-loader"],
+      .preloader,
+      #preloader,
+      .loader-overlay {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
+
+      .reveal,
+      [data-reveal],
+      [data-animate],
+      [class*="fade-in"],
+      [class*="animate-in"] {
+        opacity: 1 !important;
+        visibility: visible !important;
+        transform: none !important;
+      }
+
+      html { scroll-behavior: auto !important; }
+      body { min-height: 100vh; }
+      a, button, input, select, textarea { pointer-events: auto; }
+    `;
+    documentNode.head.appendChild(editorStyle);
+  }
+
+  documentNode.querySelectorAll('.page-loader, .preloader, #preloader, .loader-overlay').forEach((node) => {
+    (node as HTMLElement).style.display = 'none';
+  });
+  documentNode.querySelectorAll('.reveal, [data-reveal], [data-animate]').forEach((node) => {
+    node.classList.add('is-visible', 'visible', 'active');
+  });
+}
+
+function runEditorJavascript(editor: Editor, javascript: string, enabled: boolean) {
+  const frame = editor.Canvas.getFrameEl();
+  const frameWindow = frame?.contentWindow;
+  const documentNode = frame?.contentDocument;
+  if (!documentNode?.body || !frameWindow) return;
 
   documentNode.querySelectorAll('[data-canvasforge-runtime]').forEach((node) => node.remove());
+  prepareEditorCanvas(editor);
   if (!enabled || !javascript.trim()) return;
 
   const guard = documentNode.createElement('script');
@@ -181,12 +230,18 @@ function runEditorJavascript(editor: Editor, javascript: string, enabled: boolea
   runtime.setAttribute('data-canvasforge-runtime', 'custom');
   runtime.textContent = `(() => {
     try {
-      ${javascript.replace('`', '\\`')}
+      ${javascript.replace(/<\/script/gi, '<\\/script')}
     } catch (error) {
       console.error('CanvasForge editor JavaScript error:', error);
     }
   })();`;
   documentNode.body.appendChild(runtime);
+
+  // Imported scripts frequently wait for these events. The editor iframe has
+  // already loaded, so trigger them after installing the script.
+  documentNode.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
+  frameWindow.dispatchEvent(new Event('load'));
+  window.setTimeout(() => prepareEditorCanvas(editor), 80);
 }
 
 function selectedComponentName(component: any) {
@@ -209,7 +264,7 @@ export function EditorClient() {
   const [site, setSite] = useState<Site | null>(null);
   const [loading, setLoading] = useState(true);
   const [editorReady, setEditorReady] = useState(false);
-  const [liveCanvas, setLiveCanvas] = useState(true);
+  const [liveCanvas, setLiveCanvas] = useState(false);
   const [selectedElement, setSelectedElement] = useState('Nothing selected');
   const [activeDevice, setActiveDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [saveState, setSaveState] = useState<SaveState>('saved');
@@ -293,16 +348,32 @@ export function EditorClient() {
     editor.BlockManager.add('form', { label: 'Contact form', category: 'Content', content: '<form><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label><label>Message<textarea name="message" required></textarea></label><input name="_cf_website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true"><button type="submit">Send message</button><p data-canvasforge-status></p></form>' });
     editor.BlockManager.add('image', { label: 'Image', category: 'Media', activate: true, content: { type: 'image' } });
     editor.BlockManager.add('video', { label: 'Video', category: 'Media', content: { type: 'video', src: 'https://www.youtube.com/embed/dQw4w9WgXcQ' } });
-    if (loadedSite.project_data && Object.keys(loadedSite.project_data).length) editor.loadProjectData(loadedSite.project_data as never);
-    else { editor.setComponents(loadedSite.html || ''); editor.setStyle(loadedSite.css || ''); }
+    // HTML and CSS are the source of truth after ZIP/code imports. Older saved
+    // project_data can contain a stale, partially rendered canvas, so use it only
+    // when the site has no stored HTML/CSS yet.
+    if (loadedSite.html || loadedSite.css) {
+      editor.setComponents(loadedSite.html || '');
+      editor.setStyle(loadedSite.css || '');
+    } else if (loadedSite.project_data && Object.keys(loadedSite.project_data).length) {
+      editor.loadProjectData(loadedSite.project_data as never);
+    } else {
+      editor.setComponents('<main><h1>Start editing</h1></main>');
+      editor.setStyle('');
+    }
     editor.on('update', queueSave);
     editor.on('component:selected', (component: any) => setSelectedElement(selectedComponentName(component)));
     editor.on('component:deselected', () => setSelectedElement('Nothing selected'));
     editor.on('load', () => {
-      window.setTimeout(() => runEditorJavascript(editor, javascriptRef.current, liveCanvas), 120);
+      window.setTimeout(() => {
+        prepareEditorCanvas(editor);
+        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
+      }, 120);
     });
     editor.on('canvas:frame:load', () => {
-      window.setTimeout(() => runEditorJavascript(editor, javascriptRef.current, liveCanvas), 120);
+      window.setTimeout(() => {
+        prepareEditorCanvas(editor);
+        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
+      }, 120);
     });
 
     // Remove GrapesJS's built-in HTML/CSS-only code viewer so users always use
@@ -344,6 +415,32 @@ export function EditorClient() {
     const next = !liveCanvas;
     setLiveCanvas(next);
     if (editorRef.current) window.setTimeout(() => runEditorJavascript(editorRef.current!, javascriptRef.current, next), 50);
+  }
+
+  function editSelectedText() {
+    const editor = editorRef.current;
+    const selected = editor?.getSelected();
+    if (!editor || !selected) {
+      setError('Select a heading, paragraph, button, or other text element first.');
+      return;
+    }
+
+    const tag = String(selected.get('tagName') || '').toLowerCase();
+    if (['img', 'video', 'iframe', 'input', 'textarea', 'select', 'form'].includes(tag)) {
+      setError('That element does not contain editable text.');
+      return;
+    }
+
+    const element = selected.getEl() as HTMLElement | undefined;
+    const existing = element?.innerText ?? String(selected.get('content') || '');
+    const next = window.prompt('Edit text', existing);
+    if (next === null) return;
+
+    // This intentionally replaces the selected element's inner content. It is
+    // ideal for headings, paragraphs, links, and buttons.
+    selected.components(next);
+    editor.select(selected);
+    queueSave();
   }
 
   function queueSave() {
@@ -652,6 +749,8 @@ async function uploadAsset(file: File, pathHint?: string) {
         <button className="workspace-icon-button" type="button" onClick={undoEditor} title="Undo">↶</button>
         <button className="workspace-icon-button" type="button" onClick={redoEditor} title="Redo">↷</button>
         <span className="workspace-divider" />
+        <button className="workspace-device-button" type="button" onClick={editSelectedText}>Edit text</button>
+        <span className="workspace-divider" />
         <button className={`workspace-device-button ${activeDevice==='desktop'?'active':''}`} type="button" onClick={()=>setEditorDevice('desktop')}>Desktop</button>
         <button className={`workspace-device-button ${activeDevice==='tablet'?'active':''}`} type="button" onClick={()=>setEditorDevice('tablet')}>Tablet</button>
         <button className={`workspace-device-button ${activeDevice==='mobile'?'active':''}`} type="button" onClick={()=>setEditorDevice('mobile')}>Mobile</button>
@@ -661,7 +760,7 @@ async function uploadAsset(file: File, pathHint?: string) {
         {liveCanvas ? 'Interactions on' : 'Interactions off'}
       </button>
     </div>
-    <div className="editor-help-strip">Click an element to select it. Double-click text to edit. Select an image, then choose <strong>Add / replace photo</strong>. JavaScript interactions display directly in the editor while navigation and form submission stay disabled.</div>
+    <div className="editor-help-strip">Click an element to select it. Double-click text to edit. Select an image, then choose <strong>Add / replace photo</strong>. The finished styling and images display in the editor. Double-click text or select it and click Edit text. Turn Interactions on only when testing menus, sliders, or animations.</div>
     <main className="editor-main"><div id="gjs" /></main>
 
     {showImport && <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Edit or import code</h2><button className="button-ghost" onClick={()=>setShowImport(false)}>✕</button></div><div className="modal-body"><div className="tabs"><button className={`tab ${importTab==='bundle'?'active':''}`} onClick={()=>setImportTab('bundle')}>Full HTML</button><button className={`tab ${importTab==='separate'?'active':''}`} onClick={()=>setImportTab('separate')}>Separate files</button></div>{importTab==='bundle'?<div className="field"><label>Paste complete HTML</label><textarea className="textarea tall" value={importBundle} onChange={(e)=>setImportBundle(e.target.value)}/><small>Inline &lt;script&gt; code is imported automatically. For sites with local image folders, use Import ZIP instead.</small></div>:<div className="field"><div className="tabs code-tabs"><button className={`tab ${codeTab==='html'?'active':''}`} onClick={()=>setCodeTab('html')}>HTML</button><button className={`tab ${codeTab==='css'?'active':''}`} onClick={()=>setCodeTab('css')}>CSS</button><button className={`tab ${codeTab==='javascript'?'active':''}`} onClick={()=>setCodeTab('javascript')}>JavaScript</button></div>{codeTab==='html'&&<textarea aria-label="HTML code" className="textarea code-editor-textarea" value={importHtml} onChange={(e)=>setImportHtml(e.target.value)} spellCheck={false}/>} {codeTab==='css'&&<textarea aria-label="CSS code" className="textarea code-editor-textarea" value={importCss} onChange={(e)=>setImportCss(e.target.value)} spellCheck={false}/>} {codeTab==='javascript'&&<><textarea aria-label="JavaScript code" className="textarea code-editor-textarea" value={importJs} onChange={(e)=>setImportJs(e.target.value)} spellCheck={false} placeholder="// Add your JavaScript here"/><small>JavaScript is saved with the site and now runs directly in the editor when “Interactions on” is enabled. It also runs on the published site.</small></>}</div>}</div><div className="modal-footer"><button className="button-secondary" onClick={()=>setShowImport(false)}>Cancel</button><button className="button-primary" onClick={applyImport}>Apply code</button></div></div></div>}
