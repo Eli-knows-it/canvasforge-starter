@@ -12,6 +12,46 @@ import type { Site } from '@/lib/types';
 
 type SaveState = 'saved' | 'saving' | 'unsaved' | 'error';
 
+function getMimeType(filename: string): string {
+  const extension = filename.split('.').pop()?.toLowerCase();
+
+  const mimeTypes: Record<string, string> = {
+    html: 'text/html',
+    htm: 'text/html',
+    css: 'text/css',
+    js: 'text/javascript',
+    mjs: 'text/javascript',
+    json: 'application/json',
+    txt: 'text/plain',
+    xml: 'application/xml',
+
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    avif: 'image/avif',
+    svg: 'image/svg+xml',
+    ico: 'image/x-icon',
+
+    woff: 'font/woff',
+    woff2: 'font/woff2',
+    ttf: 'font/ttf',
+    otf: 'font/otf',
+
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+
+    pdf: 'application/pdf'
+  };
+
+  return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
+}
+
+
+
 function previewDocument(html: string, css: string, javascript: string, runScripts: boolean) {
   const safeScript = runScripts ? javascript.replace(/<\/script/gi, '<\\/script') : '';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${html}${runScripts ? `<script>${safeScript}</script>` : ''}</body></html>`;
@@ -213,18 +253,47 @@ export function EditorClient() {
     setShowImport(false); queueSave();
   }
 
-  async function uploadAsset(file: File, pathHint?: string) {
-    const current = siteRef.current;
-    if (!current) throw new Error('Website not loaded.');
-    const supabase = getSupabase();
-    const { data: authData } = await supabase.auth.getUser();
-    if (!authData.user) throw new Error('Your session has expired.');
-    const cleanName = (pathHint || file.name).replace(/[^a-zA-Z0-9._/-]/g, '-').replace(/\.\./g, '');
-    const path = `${authData.user.id}/${current.id}/${crypto.randomUUID()}-${cleanName.split('/').pop()}`;
-    const { error: uploadError } = await supabase.storage.from('site-assets').upload(path, file, { cacheControl: '31536000' });
-    if (uploadError) throw uploadError;
-    return supabase.storage.from('site-assets').getPublicUrl(path).data.publicUrl;
+async function uploadAsset(file: File, pathHint?: string) {
+  const current = siteRef.current;
+  if (!current) throw new Error('Website not loaded.');
+
+  const supabase = getSupabase();
+  const { data: authData } = await supabase.auth.getUser();
+
+  if (!authData.user) {
+    throw new Error('Your session has expired.');
   }
+
+  const cleanName = (pathHint || file.name)
+    .replace(/[^a-zA-Z0-9._/-]/g, '-')
+    .replace(/\.\./g, '');
+
+  const fileName = cleanName.split('/').pop() || file.name;
+
+  const path =
+    `${authData.user.id}/${current.id}/${crypto.randomUUID()}-${fileName}`;
+
+  const contentType =
+    getMimeType(pathHint || file.name);
+
+  const { error: uploadError } = await supabase.storage
+    .from('site-assets')
+    .upload(path, file, {
+      cacheControl: '31536000',
+      contentType,
+      upsert: true
+    });
+
+  if (uploadError) {
+    throw new Error(
+      `Could not upload ${pathHint || file.name}: ${uploadError.message}`
+    );
+  }
+
+  return supabase.storage
+    .from('site-assets')
+    .getPublicUrl(path).data.publicUrl;
+}
 
   async function uploadImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
