@@ -68,7 +68,10 @@ export function DashboardClient() {
           html: defaultHtml,
           css: defaultCss,
           javascript: '',
-          project_data: null
+          project_data: null,
+          is_published: false,
+          published_at: null,
+          form_email: null
         })
         .select('*')
         .single();
@@ -143,9 +146,10 @@ export function DashboardClient() {
               </div>
               <div className="site-card-body">
                 <div className="site-title-row"><h2 className="site-title">{site.name}</h2></div>
-                <p className="site-meta">Updated {new Date(site.updated_at).toLocaleString()}</p>
+                <p className="site-meta">{site.is_published ? 'Published' : 'Draft'} · Updated {new Date(site.updated_at).toLocaleString()}</p>
                 <div className="site-actions">
                   <Link className="button-primary button-small" href={`/editor/${site.id}`}>Edit</Link>
+                  {site.is_published && <a className="button-secondary button-small" href={`https://${site.slug}.${process.env.NEXT_PUBLIC_ROOT_DOMAIN || 'canvasforge.com'}`} target="_blank" rel="noreferrer">View live</a>}
                   <button className="button-danger button-small" onClick={() => deleteSite(site)}>Delete</button>
                 </div>
               </div>
