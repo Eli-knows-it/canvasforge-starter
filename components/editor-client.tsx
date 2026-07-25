@@ -71,16 +71,61 @@ function normalizeAssetPath(value: string) {
   return decodeURIComponent(value.split('?')[0].split('#')[0]).replace(/^\.\//, '').replace(/^\//, '');
 }
 
-function replaceAssetReferences(source: string, assets: Map<string, string>) {
+function replaceAssetReferences(
+  source: string,
+  assets: Map<string, string>
+) {
   let result = source;
-  const entries = Array.from(assets.entries()).sort((a, b) => b[0].length - a[0].length);
-  for (const [path, url] of entries) {
-    const variants = new Set([path, `./${path}`, `/${path}`, path.split('/').pop() || path]);
-    for (const variant of variants) result = result.split(variant).join(url);
+
+  const entries = Array.from(assets.entries()).sort(
+    (a, b) => b[0].length - a[0].length
+  );
+
+  for (const [originalPath, hostedUrl] of entries) {
+    const cleanPath = originalPath
+      .replace(/\\/g, '/')
+      .replace(/^\.?\//, '');
+
+    const fileName = cleanPath.split('/').pop() || cleanPath;
+
+    const withoutImagesFolder = cleanPath.replace(/^images\//i, '');
+    const withoutAssetsFolder = cleanPath.replace(/^assets\//i, '');
+
+    const variants = new Set<string>([
+      originalPath,
+      cleanPath,
+      `./${cleanPath}`,
+      `/${cleanPath}`,
+      fileName,
+
+      // Support images/ folder
+      `images/${fileName}`,
+      `./images/${fileName}`,
+      `/images/${fileName}`,
+
+      // Support assets/ folder
+      `assets/${fileName}`,
+      `./assets/${fileName}`,
+      `/assets/${fileName}`,
+
+      // Support nested paths when swapping folder names
+      `images/${withoutAssetsFolder}`,
+      `./images/${withoutAssetsFolder}`,
+      `/images/${withoutAssetsFolder}`,
+
+      `assets/${withoutImagesFolder}`,
+      `./assets/${withoutImagesFolder}`,
+      `/assets/${withoutImagesFolder}`
+    ]);
+
+    for (const variant of variants) {
+      if (!variant) continue;
+      result = result.split(variant).join(hostedUrl);
+    }
   }
+
   return result;
 }
-
 export function EditorClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
