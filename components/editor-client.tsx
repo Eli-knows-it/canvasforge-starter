@@ -68,64 +68,95 @@ function splitFullHtml(source: string) {
 }
 
 function normalizeAssetPath(value: string) {
-  return decodeURIComponent(value.split('?')[0].split('#')[0]).replace(/^\.\//, '').replace(/^\//, '');
+  const clean = decodeURIComponent(value.split('?')[0].split('#')[0])
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '');
+
+  const parts: string[] = [];
+  for (const part of clean.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return parts.join('/');
+}
+
+function zipDirectory(path: string) {
+  const normalized = normalizeAssetPath(path);
+  const index = normalized.lastIndexOf('/');
+  return index === -1 ? '' : normalized.slice(0, index);
+}
+
+function joinZipPath(baseDir: string, value: string) {
+  if (/^(?:[a-z]+:|\/\/|data:|blob:|#)/i.test(value.trim())) return '';
+  return normalizeAssetPath(`${baseDir ? `${baseDir}/` : ''}${value}`);
+}
+
+function buildAssetVariants(
+  assets: Map<string, string>,
+  siteRoot: string
+) {
+  const variants = new Map<string, string>();
+  const basenameCounts = new Map<string, number>();
+
+  for (const path of assets.keys()) {
+    const basename = path.split('/').pop() || path;
+    basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
+  }
+
+  for (const [fullPath, hostedUrl] of assets) {
+    const cleanPath = normalizeAssetPath(fullPath);
+    const relativePath = siteRoot && cleanPath.startsWith(`${siteRoot}/`)
+      ? cleanPath.slice(siteRoot.length + 1)
+      : cleanPath;
+    const basename = cleanPath.split('/').pop() || cleanPath;
+
+    const candidates = [
+      cleanPath,
+      `./${cleanPath}`,
+      `/${cleanPath}`,
+      relativePath,
+      `./${relativePath}`,
+      `/${relativePath}`
+    ];
+
+    if (basenameCounts.get(basename) === 1) candidates.push(basename);
+
+    for (const candidate of candidates) {
+      if (candidate) variants.set(candidate, hostedUrl);
+    }
+  }
+
+  return variants;
 }
 
 function replaceAssetReferences(
   source: string,
-  assets: Map<string, string>
+  assets: Map<string, string>,
+  siteRoot: string
 ) {
-  let result = source;
+  if (!source || assets.size === 0) return source;
 
-  const entries = Array.from(assets.entries()).sort(
-    (a, b) => b[0].length - a[0].length
-  );
+  const variants = buildAssetVariants(assets, siteRoot);
+  const keys = Array.from(variants.keys()).sort((a, b) => b.length - a.length);
+  if (!keys.length) return source;
 
-  for (const [originalPath, hostedUrl] of entries) {
-    const cleanPath = originalPath
-      .replace(/\\/g, '/')
-      .replace(/^\.?\//, '');
+  const escaped = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(escaped.join('|'), 'g');
 
-    const fileName = cleanPath.split('/').pop() || cleanPath;
-
-    const withoutImagesFolder = cleanPath.replace(/^images\//i, '');
-    const withoutAssetsFolder = cleanPath.replace(/^assets\//i, '');
-
-    const variants = new Set<string>([
-      originalPath,
-      cleanPath,
-      `./${cleanPath}`,
-      `/${cleanPath}`,
-      fileName,
-
-      // Support images/ folder
-      `images/${fileName}`,
-      `./images/${fileName}`,
-      `/images/${fileName}`,
-
-      // Support assets/ folder
-      `assets/${fileName}`,
-      `./assets/${fileName}`,
-      `/assets/${fileName}`,
-
-      // Support nested paths when swapping folder names
-      `images/${withoutAssetsFolder}`,
-      `./images/${withoutAssetsFolder}`,
-      `/images/${withoutAssetsFolder}`,
-
-      `assets/${withoutImagesFolder}`,
-      `./assets/${withoutImagesFolder}`,
-      `/assets/${withoutImagesFolder}`
-    ]);
-
-    for (const variant of variants) {
-      if (!variant) continue;
-      result = result.split(variant).join(hostedUrl);
-    }
-  }
-
-  return result;
+  return source.replace(pattern, (matched) => variants.get(matched) || matched);
 }
+
+function findZipEntry(
+  files: JSZipObject[],
+  baseDir: string,
+  reference: string
+) {
+  const resolved = joinZipPath(baseDir, reference);
+  if (!resolved) return undefined;
+  return files.find((entry) => normalizeAssetPath(entry.name) === resolved);
+}
+
 export function EditorClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -380,36 +411,120 @@ async function uploadAsset(file: File, pathHint?: string) {
   async function importZip(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    setImportingZip(true); setError('');
+
+    setImportingZip(true);
+    setError('');
+
     try {
       const zip = await JSZip.loadAsync(file);
-      const files = (Object.values(zip.files) as JSZipObject[]).filter((entry) => !entry.dir && !entry.name.includes('__MACOSX'));
-      const htmlEntry = files.find((entry) => /(^|\/)index\.html?$/i.test(entry.name)) || files.find((entry) => /\.html?$/i.test(entry.name));
+      const files = (Object.values(zip.files) as JSZipObject[]).filter(
+        (entry) => !entry.dir && !entry.name.includes('__MACOSX')
+      );
+
+      const htmlEntry =
+        files.find((entry) => /(^|\/)index\.html?$/i.test(entry.name)) ||
+        files.find((entry) => /\.html?$/i.test(entry.name));
+
       if (!htmlEntry) throw new Error('The ZIP must include index.html.');
+
+      const siteRoot = zipDirectory(htmlEntry.name);
       let source = await htmlEntry.async('text');
       const assetMap = new Map<string, string>();
-      for (const entry of files) {
-        if (!/\.(png|jpe?g|gif|webp|svg|avif|ico)$/i.test(entry.name)) continue;
+
+      // Upload every non-code website asset and preserve its original ZIP path.
+      const uploadable = files.filter((entry) =>
+        !/\.(?:html?|css|js|mjs|cjs|map|md|txt)$/i.test(entry.name)
+      );
+
+      for (const entry of uploadable) {
         const blob = await entry.async('blob');
-        const uploaded = new File([blob], entry.name.split('/').pop() || 'image', { type: blob.type || 'application/octet-stream' });
-        const url = await uploadAsset(uploaded, entry.name);
+        const filename = entry.name.split('/').pop() || 'asset';
+        const typedFile = new File([blob], filename, {
+          type: getMimeType(entry.name)
+        });
+        const url = await uploadAsset(typedFile, entry.name);
         assetMap.set(normalizeAssetPath(entry.name), url);
       }
-      source = replaceAssetReferences(source, assetMap);
+
+      // Determine the specific CSS and JavaScript files linked by index.html.
+      const documentNode = new DOMParser().parseFromString(source, 'text/html');
+      const allStylesheetRefs = Array.from(
+        documentNode.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]')
+      )
+        .map((node) => node.getAttribute('href') || '')
+        .filter(Boolean);
+
+      const stylesheetRefs = allStylesheetRefs.filter(
+        (href) => !/^(?:https?:|\/\/|data:)/i.test(href)
+      );
+      const externalStylesheetRefs = allStylesheetRefs.filter((href) =>
+        /^(?:https?:|\/\/)/i.test(href)
+      );
+
+      const scriptRefs = Array.from(
+        documentNode.querySelectorAll<HTMLScriptElement>('script[src]')
+      )
+        .map((node) => node.getAttribute('src') || '')
+        .filter((src) => src && !/^(?:https?:|\/\/|data:)/i.test(src));
+
+      source = replaceAssetReferences(source, assetMap, siteRoot);
       const parsed = splitFullHtml(source);
-      const cssParts: string[] = [parsed.css];
+      const cssParts: string[] = [
+        ...externalStylesheetRefs.map((href) => `@import url("${href}");`),
+        parsed.css
+      ];
       const jsParts: string[] = [parsed.javascript];
-      for (const entry of files) {
-        if (/\.css$/i.test(entry.name)) cssParts.push(replaceAssetReferences(await entry.async('text'), assetMap));
-        if (/\.js$/i.test(entry.name)) jsParts.push(await entry.async('text'));
+
+      for (const href of stylesheetRefs) {
+        const entry = findZipEntry(files, siteRoot, href);
+        if (!entry) throw new Error(`The stylesheet ${href} was not found in the ZIP.`);
+        const css = await entry.async('text');
+        cssParts.push(replaceAssetReferences(css, assetMap, siteRoot));
       }
-      editorRef.current?.setComponents(parsed.html);
-      editorRef.current?.setStyle(cssParts.filter(Boolean).join('\n'));
+
+      for (const src of scriptRefs) {
+        const entry = findZipEntry(files, siteRoot, src);
+        if (!entry) throw new Error(`The script ${src} was not found in the ZIP.`);
+        jsParts.push(await entry.async('text'));
+      }
+
+      // Fallback for exports that omit link/script tags but still include one CSS/JS file.
+      if (stylesheetRefs.length === 0) {
+        for (const entry of files.filter((item) => /\.css$/i.test(item.name))) {
+          cssParts.push(
+            replaceAssetReferences(await entry.async('text'), assetMap, siteRoot)
+          );
+        }
+      }
+      if (scriptRefs.length === 0) {
+        for (const entry of files.filter((item) => /\.(?:js|mjs)$/i.test(item.name))) {
+          jsParts.push(await entry.async('text'));
+        }
+      }
+
+      const editor = editorRef.current;
+      if (!editor) throw new Error('The editor is not ready yet.');
+
+      editor.setComponents(parsed.html || '<main><h1>Start editing</h1></main>');
+      editor.setStyle(cssParts.filter(Boolean).join('\n'));
       javascriptRef.current = jsParts.filter(Boolean).join('\n');
       setJavascript(javascriptRef.current);
+
+      // Make uploaded assets available in GrapesJS's asset picker as well.
+      for (const [originalPath, url] of assetMap) {
+        editor.AssetManager.add({
+          src: url,
+          name: originalPath.split('/').pop() || originalPath
+        });
+      }
+
       queueSave();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'ZIP import failed.'); }
-    finally { setImportingZip(false); event.target.value = ''; }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'ZIP import failed.');
+    } finally {
+      setImportingZip(false);
+      event.target.value = '';
+    }
   }
 
   async function updatePublishing(publish: boolean) {
