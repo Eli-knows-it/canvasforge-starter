@@ -135,7 +135,7 @@ button:disabled { opacity: .55; cursor: not-allowed; transform: none !important;
 .tab { border: 1px solid var(--line); padding: 8px 12px; border-radius: 9px; background: white; }
 .tab.active { background: #eef2ff; color: var(--brand-dark); border-color: #c7d2fe; }
 
-.editor-shell { height: 100vh; display: grid; grid-template-rows: 64px 1fr; overflow: hidden; background: #111827; }
+.editor-shell { height: 100vh; display: grid; grid-template-rows: 64px auto auto minmax(0, 1fr); overflow: hidden; background: #111827; }
 .editor-bar { background: #111827; color: white; display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid rgba(255,255,255,.11); }
 .editor-left, .editor-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .editor-name { border: 1px solid transparent; background: transparent; color: white; font-weight: 750; padding: 8px 10px; border-radius: 8px; min-width: 180px; }
@@ -269,10 +269,14 @@ button:disabled { opacity: .55; cursor: not-allowed; transform: none !important;
   text-align: center;
 }
 .editor-main {
+  min-height: 0;
+  overflow: hidden;
   background: #e9edf3;
   padding: 18px;
 }
 .editor-main > #gjs {
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   border-radius: 9px;
   box-shadow: 0 8px 26px rgba(15, 23, 42, 0.13);
