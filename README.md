@@ -129,3 +129,4 @@ Import ZIP is intended for plain static sites. It handles HTML, CSS, JavaScript,
 - Published website JavaScript executes on the customer website origin, not in the CanvasForge dashboard.
 - The form endpoint validates content type, limits field count and length, uses a honeypot, and does not expose the recipient email publicly.
 - Before charging customers, add CAPTCHA/Turnstile, durable rate limiting, malware scanning, audit logs, backups, dependency monitoring, and a professional penetration test.
+ 
