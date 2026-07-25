@@ -134,11 +134,18 @@ export function EditorClient() {
 
     // Remove GrapesJS's built-in HTML/CSS-only code viewer so users always use
     // CanvasForge's HTML/CSS/JavaScript editor instead.
-    editor.Panels.getPanels().forEach((panel) => {
+    editor.Panels.getPanels().forEach((panel: any) => {
       const buttons = panel.get('buttons');
+    
       buttons?.models
-        .filter((button) => button.get('command') === 'export-template' || button.get('id') === 'export-template')
-        .forEach((button) => buttons.remove(button));
+        .filter(
+          (button: any) =>
+            button.get('command') === 'export-template' ||
+            button.get('id') === 'export-template'
+        )
+        .forEach((button: any) => {
+          buttons.remove(button);
+        });
     });
 
     editorRef.current = editor;
