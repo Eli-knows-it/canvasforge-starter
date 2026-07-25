@@ -12,9 +12,12 @@ create table if not exists public.sites (
   css text not null default '',
   javascript text not null default '',
   project_data jsonb,
+  is_published boolean not null default false,
+  published_at timestamptz,
+  form_email text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (owner_id, slug)
+  unique (slug)
 );
 
 create index if not exists sites_owner_updated_idx on public.sites(owner_id, updated_at desc);
@@ -23,6 +26,7 @@ alter table public.sites enable row level security;
 
 revoke all on public.sites from anon;
 grant select, insert, update, delete on public.sites to authenticated;
+
 
 create policy "Owners can read their websites"
 on public.sites for select
