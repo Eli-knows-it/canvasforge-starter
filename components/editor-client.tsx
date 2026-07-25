@@ -69,6 +69,7 @@ export function EditorClient() {
   const [formEmail, setFormEmail] = useState('');
   const [publishing, setPublishing] = useState(false);
   const [importingZip, setImportingZip] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -130,6 +131,16 @@ export function EditorClient() {
     if (loadedSite.project_data && Object.keys(loadedSite.project_data).length) editor.loadProjectData(loadedSite.project_data as never);
     else { editor.setComponents(loadedSite.html || ''); editor.setStyle(loadedSite.css || ''); }
     editor.on('update', queueSave);
+
+    // Remove GrapesJS's built-in HTML/CSS-only code viewer so users always use
+    // CanvasForge's HTML/CSS/JavaScript editor instead.
+    editor.Panels.getPanels().forEach((panel) => {
+      const buttons = panel.get('buttons');
+      buttons?.models
+        .filter((button) => button.get('command') === 'export-template' || button.get('id') === 'export-template')
+        .forEach((button) => buttons.remove(button));
+    });
+
     editorRef.current = editor;
     setEditorReady(true);
   }
@@ -174,6 +185,16 @@ export function EditorClient() {
     setShowImport(true);
   }
 
+  function openJavascriptModal() {
+    const editor = editorRef.current;
+    setImportTab('separate');
+    setCodeTab('javascript');
+    setImportHtml(editor?.getHtml() || siteRef.current?.html || '');
+    setImportCss(editor?.getCss() || siteRef.current?.css || '');
+    setImportJs(javascriptRef.current);
+    setShowImport(true);
+  }
+
   function applyImport() {
     const editor = editorRef.current;
     if (!editor) return;
@@ -201,13 +222,38 @@ export function EditorClient() {
   async function uploadImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+    setUploadingImage(true);
+    setError('');
     try {
       if (!file.type.startsWith('image/') || file.size > 8 * 1024 * 1024) throw new Error('Choose an image no larger than 8 MB.');
       const url = await uploadAsset(file);
-      editorRef.current?.AssetManager.add({ src: url, name: file.name });
-      editorRef.current?.AssetManager.open();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Image upload failed.'); }
-    finally { event.target.value = ''; }
+      const editor = editorRef.current;
+      if (!editor) throw new Error('The editor is not ready yet.');
+
+      editor.AssetManager.add({ src: url, name: file.name });
+      const selected = editor.getSelected();
+      const selectedType = String(selected?.get('type') || '');
+      const selectedTag = String(selected?.get('tagName') || '').toLowerCase();
+
+      if (selected && (selectedType === 'image' || selectedTag === 'img')) {
+        selected.addAttributes({ src: url, alt: selected.getAttributes().alt || file.name.replace(/\.[^.]+$/, '') });
+        editor.select(selected);
+      } else {
+        const image = editor.addComponents({
+          type: 'image',
+          attributes: { src: url, alt: file.name.replace(/\.[^.]+$/, '') },
+          style: { 'max-width': '100%', height: 'auto', display: 'block' }
+        })[0];
+        if (image) editor.select(image);
+      }
+
+      queueSave();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Image upload failed.');
+    } finally {
+      setUploadingImage(false);
+      event.target.value = '';
+    }
   }
 
   async function importZip(event: ChangeEvent<HTMLInputElement>) {
@@ -276,9 +322,10 @@ export function EditorClient() {
       <div className="editor-left"><Link className="button-ghost button-small" style={{color:'white'}} href="/dashboard">← Dashboard</Link><input className="editor-name" value={site.name} onChange={(e)=>updateName(e.target.value)} maxLength={80}/><span className="save-status">{statusText}</span></div>
       <div className="editor-right">
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={uploadImage}/><input ref={zipRef} type="file" accept=".zip,application/zip" hidden onChange={importZip}/>
-        <button className="button-ghost button-small hide-mobile" style={{color:'white'}} onClick={()=>fileRef.current?.click()}>Upload image</button>
+        <button className="button-ghost button-small hide-mobile" style={{color:'white'}} disabled={uploadingImage} title="Select an image on the page to replace it, or upload with nothing selected to add a new image" onClick={()=>fileRef.current?.click()}>{uploadingImage?'Uploading…':'Add / replace photo'}</button>
         <button className="button-ghost button-small" style={{color:'white'}} disabled={importingZip} onClick={()=>zipRef.current?.click()}>{importingZip?'Importing…':'Import ZIP'}</button>
-        <button className="button-ghost button-small" style={{color:'white'}} onClick={openCodeModal}>Code</button>
+        <button className="button-ghost button-small" style={{color:'white'}} onClick={openCodeModal}>HTML / CSS</button>
+        <button className="button-ghost button-small" style={{color:'white'}} onClick={openJavascriptModal}>JavaScript</button>
         <button className="button-ghost button-small" style={{color:'white'}} onClick={()=>setShowPreview(true)}>Preview</button>
         <button className="button-secondary button-small" onClick={()=>setShowPublish(true)}>{site.is_published?'Publishing settings':'Publish'}</button>
         <button className="button-primary button-small" onClick={()=>saveSite()}>Save</button>
@@ -294,4 +341,3 @@ export function EditorClient() {
     {showPublish && <div className="modal-backdrop"><div className="modal publish-modal"><div className="modal-header"><h2>Publish website</h2><button className="button-ghost" onClick={()=>setShowPublish(false)}>✕</button></div><div className="modal-body form-stack"><div className="field"><label>CanvasForge subdomain</label><div className="domain-field"><input className="input" value={publishSlug} onChange={(e)=>setPublishSlug(e.target.value)}/><span>.{rootDomain}</span></div></div><div className="field"><label>Send all website forms to</label><input type="email" className="input" value={formEmail} onChange={(e)=>setFormEmail(e.target.value)} placeholder="you@example.com"/><small>Any normal HTML &lt;form&gt; on the published site will send here.</small></div>{site.is_published&&<div className="message-success">Live at <a href={publicUrl} target="_blank" rel="noreferrer">{publicUrl}</a></div>}</div><div className="modal-footer">{site.is_published&&<button className="button-danger" disabled={publishing} onClick={()=>updatePublishing(false)}>Unpublish</button>}<button className="button-secondary" onClick={()=>setShowPublish(false)}>Cancel</button><button className="button-primary" disabled={publishing} onClick={()=>updatePublishing(true)}>{publishing?'Publishing…':'Save and publish'}</button></div></div></div>}
   </div>;
 }
- 
