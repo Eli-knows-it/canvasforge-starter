@@ -58,200 +58,94 @@ function previewDocument(html: string, css: string, javascript: string, runScrip
 }
 
 function splitFullHtml(source: string) {
-  if (!source.trim()) return { html: '', css: '', javascript: '' };
+  if (!source.trim()) return { html: '', css: '', javascript: '', externalStyles: [] as string[] };
   const parser = new DOMParser();
   const documentNode = parser.parseFromString(source, 'text/html');
   const styles = Array.from(documentNode.querySelectorAll('style')).map((node) => node.textContent ?? '').join('\n');
   const scripts = Array.from(documentNode.querySelectorAll('script:not([src])')).map((node) => node.textContent ?? '').join('\n');
+  const externalStyles = Array.from(documentNode.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]'))
+    .map((node) => node.getAttribute('href') || '')
+    .filter((href) => /^https?:\/\//i.test(href));
   documentNode.querySelectorAll('style, script, link[rel="stylesheet"]').forEach((node) => node.remove());
-  return { html: documentNode.body.innerHTML || source, css: styles, javascript: scripts };
+  return { html: documentNode.body.innerHTML || source, css: styles, javascript: scripts, externalStyles };
 }
+
+function prepareHtmlForEditor(html: string) {
+  const parser = new DOMParser();
+  const documentNode = parser.parseFromString(`<body>${html}</body>`, 'text/html');
+  documentNode.querySelectorAll('.page-loader').forEach((node) => node.remove());
+  documentNode.querySelectorAll('.reveal').forEach((node) => node.classList.add('is-visible'));
+  documentNode.querySelectorAll('.site-header').forEach((node) => node.classList.add('scrolled'));
+  return documentNode.body.innerHTML;
+}
+
+const EDITOR_ONLY_CSS = `
+/* CanvasForge editor-only normalization. This is not exported as part of the original design. */
+.page-loader{display:none!important}
+.reveal{opacity:1!important;transform:none!important}
+.site-header{background:rgba(10,10,10,.94)!important;backdrop-filter:blur(14px);border-color:rgba(255,255,255,.12)!important}
+html{scroll-behavior:auto!important}
+`;
 
 function normalizeAssetPath(value: string) {
-  const clean = decodeURIComponent(value.split('?')[0].split('#')[0])
-    .replace(/\\/g, '/')
-    .replace(/^\/+/, '');
-
-  const parts: string[] = [];
-  for (const part of clean.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') parts.pop();
-    else parts.push(part);
-  }
-  return parts.join('/');
-}
-
-function zipDirectory(path: string) {
-  const normalized = normalizeAssetPath(path);
-  const index = normalized.lastIndexOf('/');
-  return index === -1 ? '' : normalized.slice(0, index);
-}
-
-function joinZipPath(baseDir: string, value: string) {
-  if (/^(?:[a-z]+:|\/\/|data:|blob:|#)/i.test(value.trim())) return '';
-  return normalizeAssetPath(`${baseDir ? `${baseDir}/` : ''}${value}`);
-}
-
-function buildAssetVariants(
-  assets: Map<string, string>,
-  siteRoot: string
-) {
-  const variants = new Map<string, string>();
-  const basenameCounts = new Map<string, number>();
-
-  for (const path of assets.keys()) {
-    const basename = path.split('/').pop() || path;
-    basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
-  }
-
-  for (const [fullPath, hostedUrl] of assets) {
-    const cleanPath = normalizeAssetPath(fullPath);
-    const relativePath = siteRoot && cleanPath.startsWith(`${siteRoot}/`)
-      ? cleanPath.slice(siteRoot.length + 1)
-      : cleanPath;
-    const basename = cleanPath.split('/').pop() || cleanPath;
-
-    const candidates = [
-      cleanPath,
-      `./${cleanPath}`,
-      `/${cleanPath}`,
-      relativePath,
-      `./${relativePath}`,
-      `/${relativePath}`
-    ];
-
-    if (basenameCounts.get(basename) === 1) candidates.push(basename);
-
-    for (const candidate of candidates) {
-      if (candidate) variants.set(candidate, hostedUrl);
-    }
-  }
-
-  return variants;
+  return decodeURIComponent(value.split('?')[0].split('#')[0]).replace(/^\.\//, '').replace(/^\//, '');
 }
 
 function replaceAssetReferences(
   source: string,
-  assets: Map<string, string>,
-  siteRoot: string
+  assets: Map<string, string>
 ) {
-  if (!source || assets.size === 0) return source;
+  let result = source;
 
-  const variants = buildAssetVariants(assets, siteRoot);
-  const keys = Array.from(variants.keys()).sort((a, b) => b.length - a.length);
-  if (!keys.length) return source;
+  const entries = Array.from(assets.entries()).sort(
+    (a, b) => b[0].length - a[0].length
+  );
 
-  const escaped = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(escaped.join('|'), 'g');
+  for (const [originalPath, hostedUrl] of entries) {
+    const cleanPath = originalPath
+      .replace(/\\/g, '/')
+      .replace(/^\.?\//, '');
 
-  return source.replace(pattern, (matched) => variants.get(matched) || matched);
-}
+    const fileName = cleanPath.split('/').pop() || cleanPath;
 
-function findZipEntry(
-  files: JSZipObject[],
-  baseDir: string,
-  reference: string
-) {
-  const resolved = joinZipPath(baseDir, reference);
-  if (!resolved) return undefined;
-  return files.find((entry) => normalizeAssetPath(entry.name) === resolved);
-}
+    const withoutImagesFolder = cleanPath.replace(/^images\//i, '');
+    const withoutAssetsFolder = cleanPath.replace(/^assets\//i, '');
 
+    const variants = new Set<string>([
+      originalPath,
+      cleanPath,
+      `./${cleanPath}`,
+      `/${cleanPath}`,
+      fileName,
 
-function prepareEditorCanvas(editor: Editor) {
-  const frame = editor.Canvas.getFrameEl();
-  const documentNode = frame?.contentDocument;
-  if (!documentNode?.head || !documentNode.body) return;
+      // Support images/ folder
+      `images/${fileName}`,
+      `./images/${fileName}`,
+      `/images/${fileName}`,
 
-  let editorStyle = documentNode.querySelector<HTMLStyleElement>('[data-canvasforge-editor-style]');
-  if (!editorStyle) {
-    editorStyle = documentNode.createElement('style');
-    editorStyle.setAttribute('data-canvasforge-editor-style', 'true');
-    editorStyle.textContent = `
-      /* Show the completed design while keeping the canvas editable. */
-      .page-loader,
-      [class*="page-loader"],
-      [id*="page-loader"],
-      .preloader,
-      #preloader,
-      .loader-overlay {
-        display: none !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
-      }
+      // Support assets/ folder
+      `assets/${fileName}`,
+      `./assets/${fileName}`,
+      `/assets/${fileName}`,
 
-      .reveal,
-      [data-reveal],
-      [data-animate],
-      [class*="fade-in"],
-      [class*="animate-in"] {
-        opacity: 1 !important;
-        visibility: visible !important;
-        transform: none !important;
-      }
+      // Support nested paths when swapping folder names
+      `images/${withoutAssetsFolder}`,
+      `./images/${withoutAssetsFolder}`,
+      `/images/${withoutAssetsFolder}`,
 
-      html { scroll-behavior: auto !important; }
-      body { min-height: 100vh; }
-      a, button, input, select, textarea { pointer-events: auto; }
-    `;
-    documentNode.head.appendChild(editorStyle);
+      `assets/${withoutImagesFolder}`,
+      `./assets/${withoutImagesFolder}`,
+      `/assets/${withoutImagesFolder}`
+    ]);
+
+    for (const variant of variants) {
+      if (!variant) continue;
+      result = result.split(variant).join(hostedUrl);
+    }
   }
 
-  documentNode.querySelectorAll('.page-loader, .preloader, #preloader, .loader-overlay').forEach((node) => {
-    (node as HTMLElement).style.display = 'none';
-  });
-  documentNode.querySelectorAll('.reveal, [data-reveal], [data-animate]').forEach((node) => {
-    node.classList.add('is-visible', 'visible', 'active');
-  });
+  return result;
 }
-
-function runEditorJavascript(editor: Editor, javascript: string, enabled: boolean) {
-  const frame = editor.Canvas.getFrameEl();
-  const frameWindow = frame?.contentWindow;
-  const documentNode = frame?.contentDocument;
-  if (!documentNode?.body || !frameWindow) return;
-
-  documentNode.querySelectorAll('[data-canvasforge-runtime]').forEach((node) => node.remove());
-  prepareEditorCanvas(editor);
-  if (!enabled || !javascript.trim()) return;
-
-  const guard = documentNode.createElement('script');
-  guard.setAttribute('data-canvasforge-runtime', 'guard');
-  guard.textContent = `
-    document.addEventListener('click', function(event) {
-      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-      if (link && !link.hasAttribute('data-canvasforge-allow-navigation')) event.preventDefault();
-    }, true);
-    document.addEventListener('submit', function(event) { event.preventDefault(); }, true);
-  `;
-  documentNode.body.appendChild(guard);
-
-  const runtime = documentNode.createElement('script');
-  runtime.setAttribute('data-canvasforge-runtime', 'custom');
-  runtime.textContent = `(() => {
-    try {
-      ${javascript.replace(/<\/script/gi, '<\\/script')}
-    } catch (error) {
-      console.error('CanvasForge editor JavaScript error:', error);
-    }
-  })();`;
-  documentNode.body.appendChild(runtime);
-
-  // Imported scripts frequently wait for these events. The editor iframe has
-  // already loaded, so trigger them after installing the script.
-  documentNode.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
-  frameWindow.dispatchEvent(new Event('load'));
-  window.setTimeout(() => prepareEditorCanvas(editor), 80);
-}
-
-function selectedComponentName(component: any) {
-  if (!component) return 'Nothing selected';
-  const tag = String(component.get?.('tagName') || component.get?.('type') || 'element').toLowerCase();
-  const attributes = component.getAttributes?.() || {};
-  const label = attributes['aria-label'] || attributes.alt || attributes.title;
-  return label ? `${tag}: ${label}` : tag;
-}
-
 export function EditorClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -264,9 +158,6 @@ export function EditorClient() {
   const [site, setSite] = useState<Site | null>(null);
   const [loading, setLoading] = useState(true);
   const [editorReady, setEditorReady] = useState(false);
-  const [liveCanvas, setLiveCanvas] = useState(false);
-  const [selectedElement, setSelectedElement] = useState('Nothing selected');
-  const [activeDevice, setActiveDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [saveState, setSaveState] = useState<SaveState>('saved');
   const [javascript, setJavascript] = useState('');
   const [showImport, setShowImport] = useState(false);
@@ -299,12 +190,6 @@ export function EditorClient() {
     if (!loading && site && !editorRef.current) void initializeEditor(site);
   }, [loading, site?.id]);
 
-  useEffect(() => {
-    if (!editorReady || !editorRef.current) return;
-    const timer = window.setTimeout(() => runEditorJavascript(editorRef.current!, javascriptRef.current, liveCanvas), 120);
-    return () => window.clearTimeout(timer);
-  }, [editorReady, javascript, liveCanvas]);
-
   async function loadSite() {
     setLoading(true);
     setError('');
@@ -335,7 +220,7 @@ export function EditorClient() {
       selectorManager: { componentFirst: true },
       canvas: { styles: [], scripts: [] },
       deviceManager: { devices: [
-        { id: 'desktop', name: 'Desktop', width: '' },
+        { id: 'desktop', name: 'Desktop', width: '1440px' },
         { id: 'tablet', name: 'Tablet', width: '768px', widthMedia: '992px' },
         { id: 'mobile', name: 'Mobile', width: '390px', widthMedia: '575px' }
       ]}
@@ -348,33 +233,10 @@ export function EditorClient() {
     editor.BlockManager.add('form', { label: 'Contact form', category: 'Content', content: '<form><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label><label>Message<textarea name="message" required></textarea></label><input name="_cf_website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true"><button type="submit">Send message</button><p data-canvasforge-status></p></form>' });
     editor.BlockManager.add('image', { label: 'Image', category: 'Media', activate: true, content: { type: 'image' } });
     editor.BlockManager.add('video', { label: 'Video', category: 'Media', content: { type: 'video', src: 'https://www.youtube.com/embed/dQw4w9WgXcQ' } });
-    // HTML and CSS are the source of truth after ZIP/code imports. Older saved
-    // project_data can contain a stale, partially rendered canvas, so use it only
-    // when the site has no stored HTML/CSS yet.
-    if (loadedSite.html || loadedSite.css) {
-      editor.setComponents(loadedSite.html || '');
-      editor.setStyle(loadedSite.css || '');
-    } else if (loadedSite.project_data && Object.keys(loadedSite.project_data).length) {
-      editor.loadProjectData(loadedSite.project_data as never);
-    } else {
-      editor.setComponents('<main><h1>Start editing</h1></main>');
-      editor.setStyle('');
-    }
+    // Always render the latest imported HTML/CSS. Older GrapesJS project_data can contain stale styling.
+    editor.setComponents(prepareHtmlForEditor(loadedSite.html || ''));
+    editor.setStyle(`${loadedSite.css || ''}\n${EDITOR_ONLY_CSS}`);
     editor.on('update', queueSave);
-    editor.on('component:selected', (component: any) => setSelectedElement(selectedComponentName(component)));
-    editor.on('component:deselected', () => setSelectedElement('Nothing selected'));
-    editor.on('load', () => {
-      window.setTimeout(() => {
-        prepareEditorCanvas(editor);
-        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
-      }, 120);
-    });
-    editor.on('canvas:frame:load', () => {
-      window.setTimeout(() => {
-        prepareEditorCanvas(editor);
-        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
-      }, 120);
-    });
 
     // Remove GrapesJS's built-in HTML/CSS-only code viewer so users always use
     // CanvasForge's HTML/CSS/JavaScript editor instead.
@@ -396,53 +258,6 @@ export function EditorClient() {
     setEditorReady(true);
   }
 
-  function setEditorDevice(device: 'desktop' | 'tablet' | 'mobile') {
-    const editor = editorRef.current;
-    if (!editor) return;
-    editor.setDevice(device);
-    setActiveDevice(device);
-  }
-
-  function undoEditor() {
-    editorRef.current?.UndoManager.undo();
-  }
-
-  function redoEditor() {
-    editorRef.current?.UndoManager.redo();
-  }
-
-  function toggleLiveCanvas() {
-    const next = !liveCanvas;
-    setLiveCanvas(next);
-    if (editorRef.current) window.setTimeout(() => runEditorJavascript(editorRef.current!, javascriptRef.current, next), 50);
-  }
-
-  function editSelectedText() {
-    const editor = editorRef.current;
-    const selected = editor?.getSelected();
-    if (!editor || !selected) {
-      setError('Select a heading, paragraph, button, or other text element first.');
-      return;
-    }
-
-    const tag = String(selected.get('tagName') || '').toLowerCase();
-    if (['img', 'video', 'iframe', 'input', 'textarea', 'select', 'form'].includes(tag)) {
-      setError('That element does not contain editable text.');
-      return;
-    }
-
-    const element = selected.getEl() as HTMLElement | undefined;
-    const existing = element?.innerText ?? String(selected.get('content') || '');
-    const next = window.prompt('Edit text', existing);
-    if (next === null) return;
-
-    // This intentionally replaces the selected element's inner content. It is
-    // ideal for headings, paragraphs, links, and buttons.
-    selected.components(next);
-    editor.select(selected);
-    queueSave();
-  }
-
   function queueSave() {
     setSaveState('unsaved');
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -455,10 +270,16 @@ export function EditorClient() {
     if (!editor || !current) return;
     setSaveState('saving');
     try {
+      const htmlDocument = new DOMParser().parseFromString(`<body>${editor.getHtml()}</body>`, 'text/html');
+      htmlDocument.querySelectorAll('.site-header').forEach((node) => node.classList.remove('scrolled'));
+      htmlDocument.querySelectorAll('.reveal').forEach((node) => node.classList.remove('is-visible'));
       const payload = {
         name: (nameOverride ?? current.name).trim() || 'Untitled website',
-        html: editor.getHtml(), css: editor.getCss(), javascript: javascriptRef.current,
-        project_data: editor.getProjectData(), updated_at: new Date().toISOString()
+        html: htmlDocument.body.innerHTML,
+        css: editor.getCss().replace(EDITOR_ONLY_CSS, ''),
+        javascript: javascriptRef.current,
+        project_data: null,
+        updated_at: new Date().toISOString()
       };
       const { error: updateError } = await getSupabase().from('sites').update(payload).eq('id', current.id);
       if (updateError) throw updateError;
@@ -496,13 +317,15 @@ export function EditorClient() {
   function applyImport() {
     const editor = editorRef.current;
     if (!editor) return;
-    const parsed = importTab === 'bundle' ? splitFullHtml(importBundle) : { html: importHtml, css: importCss, javascript: importJs };
-    editor.setComponents(parsed.html || '<main><h1>Start editing</h1></main>');
-    editor.setStyle(parsed.css || '');
+    const parsed = importTab === 'bundle'
+      ? splitFullHtml(importBundle)
+      : { html: importHtml, css: importCss, javascript: importJs, externalStyles: [] as string[] };
+    const fontImports = parsed.externalStyles.map((href) => `@import url("${href}");`).join('\n');
+    editor.setComponents(prepareHtmlForEditor(parsed.html || '<main><h1>Start editing</h1></main>'));
+    editor.setStyle(`${fontImports}\n${parsed.css || ''}\n${EDITOR_ONLY_CSS}`);
     javascriptRef.current = parsed.javascript || '';
     setJavascript(parsed.javascript || '');
     setShowImport(false); queueSave();
-    window.setTimeout(() => runEditorJavascript(editor, parsed.javascript || '', liveCanvas), 100);
   }
 
 async function uploadAsset(file: File, pathHint?: string) {
@@ -587,120 +410,37 @@ async function uploadAsset(file: File, pathHint?: string) {
   async function importZip(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-
-    setImportingZip(true);
-    setError('');
-
+    setImportingZip(true); setError('');
     try {
       const zip = await JSZip.loadAsync(file);
-      const files = (Object.values(zip.files) as JSZipObject[]).filter(
-        (entry) => !entry.dir && !entry.name.includes('__MACOSX')
-      );
-
-      const htmlEntry =
-        files.find((entry) => /(^|\/)index\.html?$/i.test(entry.name)) ||
-        files.find((entry) => /\.html?$/i.test(entry.name));
-
+      const files = (Object.values(zip.files) as JSZipObject[]).filter((entry) => !entry.dir && !entry.name.includes('__MACOSX'));
+      const htmlEntry = files.find((entry) => /(^|\/)index\.html?$/i.test(entry.name)) || files.find((entry) => /\.html?$/i.test(entry.name));
       if (!htmlEntry) throw new Error('The ZIP must include index.html.');
-
-      const siteRoot = zipDirectory(htmlEntry.name);
       let source = await htmlEntry.async('text');
       const assetMap = new Map<string, string>();
-
-      // Upload every non-code website asset and preserve its original ZIP path.
-      const uploadable = files.filter((entry) =>
-        !/\.(?:html?|css|js|mjs|cjs|map|md|txt)$/i.test(entry.name)
-      );
-
-      for (const entry of uploadable) {
+      for (const entry of files) {
+        if (!/\.(png|jpe?g|gif|webp|svg|avif|ico)$/i.test(entry.name)) continue;
         const blob = await entry.async('blob');
-        const filename = entry.name.split('/').pop() || 'asset';
-        const typedFile = new File([blob], filename, {
-          type: getMimeType(entry.name)
-        });
-        const url = await uploadAsset(typedFile, entry.name);
+        const uploaded = new File([blob], entry.name.split('/').pop() || 'image', { type: blob.type || 'application/octet-stream' });
+        const url = await uploadAsset(uploaded, entry.name);
         assetMap.set(normalizeAssetPath(entry.name), url);
       }
-
-      // Determine the specific CSS and JavaScript files linked by index.html.
-      const documentNode = new DOMParser().parseFromString(source, 'text/html');
-      const allStylesheetRefs = Array.from(
-        documentNode.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]')
-      )
-        .map((node) => node.getAttribute('href') || '')
-        .filter(Boolean);
-
-      const stylesheetRefs = allStylesheetRefs.filter(
-        (href) => !/^(?:https?:|\/\/|data:)/i.test(href)
-      );
-      const externalStylesheetRefs = allStylesheetRefs.filter((href) =>
-        /^(?:https?:|\/\/)/i.test(href)
-      );
-
-      const scriptRefs = Array.from(
-        documentNode.querySelectorAll<HTMLScriptElement>('script[src]')
-      )
-        .map((node) => node.getAttribute('src') || '')
-        .filter((src) => src && !/^(?:https?:|\/\/|data:)/i.test(src));
-
-      source = replaceAssetReferences(source, assetMap, siteRoot);
+      source = replaceAssetReferences(source, assetMap);
       const parsed = splitFullHtml(source);
-      const cssParts: string[] = [
-        ...externalStylesheetRefs.map((href) => `@import url("${href}");`),
-        parsed.css
-      ];
+      const fontImports = parsed.externalStyles.map((href) => `@import url("${href}");`);
+      const cssParts: string[] = [...fontImports, parsed.css];
       const jsParts: string[] = [parsed.javascript];
-
-      for (const href of stylesheetRefs) {
-        const entry = findZipEntry(files, siteRoot, href);
-        if (!entry) throw new Error(`The stylesheet ${href} was not found in the ZIP.`);
-        const css = await entry.async('text');
-        cssParts.push(replaceAssetReferences(css, assetMap, siteRoot));
+      for (const entry of files) {
+        if (/\.css$/i.test(entry.name)) cssParts.push(replaceAssetReferences(await entry.async('text'), assetMap));
+        if (/\.js$/i.test(entry.name)) jsParts.push(await entry.async('text'));
       }
-
-      for (const src of scriptRefs) {
-        const entry = findZipEntry(files, siteRoot, src);
-        if (!entry) throw new Error(`The script ${src} was not found in the ZIP.`);
-        jsParts.push(await entry.async('text'));
-      }
-
-      // Fallback for exports that omit link/script tags but still include one CSS/JS file.
-      if (stylesheetRefs.length === 0) {
-        for (const entry of files.filter((item) => /\.css$/i.test(item.name))) {
-          cssParts.push(
-            replaceAssetReferences(await entry.async('text'), assetMap, siteRoot)
-          );
-        }
-      }
-      if (scriptRefs.length === 0) {
-        for (const entry of files.filter((item) => /\.(?:js|mjs)$/i.test(item.name))) {
-          jsParts.push(await entry.async('text'));
-        }
-      }
-
-      const editor = editorRef.current;
-      if (!editor) throw new Error('The editor is not ready yet.');
-
-      editor.setComponents(parsed.html || '<main><h1>Start editing</h1></main>');
-      editor.setStyle(cssParts.filter(Boolean).join('\n'));
+      editorRef.current?.setComponents(prepareHtmlForEditor(parsed.html));
+      editorRef.current?.setStyle(`${cssParts.filter(Boolean).join('\n')}\n${EDITOR_ONLY_CSS}`);
       javascriptRef.current = jsParts.filter(Boolean).join('\n');
       setJavascript(javascriptRef.current);
-
-      // Make uploaded assets available in GrapesJS's asset picker as well.
-      for (const [originalPath, url] of assetMap) {
-        editor.AssetManager.add({
-          src: url,
-          name: originalPath.split('/').pop() || originalPath
-        });
-      }
-
       queueSave();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'ZIP import failed.');
-    } finally {
-      setImportingZip(false);
-      event.target.value = '';
-    }
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'ZIP import failed.'); }
+    finally { setImportingZip(false); event.target.value = ''; }
   }
 
   async function updatePublishing(publish: boolean) {
@@ -744,26 +484,9 @@ async function uploadAsset(file: File, pathHint?: string) {
       </div>
     </header>
     {error && <div className="message-error floating-error" onClick={()=>setError('')}>{error}</div>}
-    <div className="editor-workspace-bar">
-      <div className="editor-workspace-group">
-        <button className="workspace-icon-button" type="button" onClick={undoEditor} title="Undo">↶</button>
-        <button className="workspace-icon-button" type="button" onClick={redoEditor} title="Redo">↷</button>
-        <span className="workspace-divider" />
-        <button className="workspace-device-button" type="button" onClick={editSelectedText}>Edit text</button>
-        <span className="workspace-divider" />
-        <button className={`workspace-device-button ${activeDevice==='desktop'?'active':''}`} type="button" onClick={()=>setEditorDevice('desktop')}>Desktop</button>
-        <button className={`workspace-device-button ${activeDevice==='tablet'?'active':''}`} type="button" onClick={()=>setEditorDevice('tablet')}>Tablet</button>
-        <button className={`workspace-device-button ${activeDevice==='mobile'?'active':''}`} type="button" onClick={()=>setEditorDevice('mobile')}>Mobile</button>
-      </div>
-      <div className="editor-selection-status"><strong>Selected:</strong> {selectedElement}</div>
-      <button className={`workspace-live-button ${liveCanvas?'active':''}`} type="button" onClick={toggleLiveCanvas} title="Show menus, sliders, animations, and other JavaScript directly in the editor">
-        {liveCanvas ? 'Interactions on' : 'Interactions off'}
-      </button>
-    </div>
-    <div className="editor-help-strip">Click an element to select it. Double-click text to edit. Select an image, then choose <strong>Add / replace photo</strong>. The finished styling and images display in the editor. Double-click text or select it and click Edit text. Turn Interactions on only when testing menus, sliders, or animations.</div>
     <main className="editor-main"><div id="gjs" /></main>
 
-    {showImport && <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Edit or import code</h2><button className="button-ghost" onClick={()=>setShowImport(false)}>✕</button></div><div className="modal-body"><div className="tabs"><button className={`tab ${importTab==='bundle'?'active':''}`} onClick={()=>setImportTab('bundle')}>Full HTML</button><button className={`tab ${importTab==='separate'?'active':''}`} onClick={()=>setImportTab('separate')}>Separate files</button></div>{importTab==='bundle'?<div className="field"><label>Paste complete HTML</label><textarea className="textarea tall" value={importBundle} onChange={(e)=>setImportBundle(e.target.value)}/><small>Inline &lt;script&gt; code is imported automatically. For sites with local image folders, use Import ZIP instead.</small></div>:<div className="field"><div className="tabs code-tabs"><button className={`tab ${codeTab==='html'?'active':''}`} onClick={()=>setCodeTab('html')}>HTML</button><button className={`tab ${codeTab==='css'?'active':''}`} onClick={()=>setCodeTab('css')}>CSS</button><button className={`tab ${codeTab==='javascript'?'active':''}`} onClick={()=>setCodeTab('javascript')}>JavaScript</button></div>{codeTab==='html'&&<textarea aria-label="HTML code" className="textarea code-editor-textarea" value={importHtml} onChange={(e)=>setImportHtml(e.target.value)} spellCheck={false}/>} {codeTab==='css'&&<textarea aria-label="CSS code" className="textarea code-editor-textarea" value={importCss} onChange={(e)=>setImportCss(e.target.value)} spellCheck={false}/>} {codeTab==='javascript'&&<><textarea aria-label="JavaScript code" className="textarea code-editor-textarea" value={importJs} onChange={(e)=>setImportJs(e.target.value)} spellCheck={false} placeholder="// Add your JavaScript here"/><small>JavaScript is saved with the site and now runs directly in the editor when “Interactions on” is enabled. It also runs on the published site.</small></>}</div>}</div><div className="modal-footer"><button className="button-secondary" onClick={()=>setShowImport(false)}>Cancel</button><button className="button-primary" onClick={applyImport}>Apply code</button></div></div></div>}
+    {showImport && <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Edit or import code</h2><button className="button-ghost" onClick={()=>setShowImport(false)}>✕</button></div><div className="modal-body"><div className="tabs"><button className={`tab ${importTab==='bundle'?'active':''}`} onClick={()=>setImportTab('bundle')}>Full HTML</button><button className={`tab ${importTab==='separate'?'active':''}`} onClick={()=>setImportTab('separate')}>Separate files</button></div>{importTab==='bundle'?<div className="field"><label>Paste complete HTML</label><textarea className="textarea tall" value={importBundle} onChange={(e)=>setImportBundle(e.target.value)}/><small>Inline &lt;script&gt; code is imported automatically. For sites with local image folders, use Import ZIP instead.</small></div>:<div className="field"><div className="tabs code-tabs"><button className={`tab ${codeTab==='html'?'active':''}`} onClick={()=>setCodeTab('html')}>HTML</button><button className={`tab ${codeTab==='css'?'active':''}`} onClick={()=>setCodeTab('css')}>CSS</button><button className={`tab ${codeTab==='javascript'?'active':''}`} onClick={()=>setCodeTab('javascript')}>JavaScript</button></div>{codeTab==='html'&&<textarea aria-label="HTML code" className="textarea code-editor-textarea" value={importHtml} onChange={(e)=>setImportHtml(e.target.value)} spellCheck={false}/>} {codeTab==='css'&&<textarea aria-label="CSS code" className="textarea code-editor-textarea" value={importCss} onChange={(e)=>setImportCss(e.target.value)} spellCheck={false}/>} {codeTab==='javascript'&&<><textarea aria-label="JavaScript code" className="textarea code-editor-textarea" value={importJs} onChange={(e)=>setImportJs(e.target.value)} spellCheck={false} placeholder="// Add your JavaScript here"/><small>JavaScript is saved with the site and runs in published sites. In Preview, enable “Run custom JavaScript.”</small></>}</div>}</div><div className="modal-footer"><button className="button-secondary" onClick={()=>setShowImport(false)}>Cancel</button><button className="button-primary" onClick={applyImport}>Apply code</button></div></div></div>}
 
     {showPreview && <div className="modal-backdrop"><div className="modal large"><div className="modal-header"><h2>Preview</h2><button className="button-ghost" onClick={()=>setShowPreview(false)}>✕</button></div><div className="modal-body"><label className="checkbox-row"><input type="checkbox" checked={runScripts} onChange={(e)=>setRunScripts(e.target.checked)}/>Run custom JavaScript</label><iframe className="preview-frame" title="Website preview" sandbox={runScripts?'allow-scripts allow-forms allow-popups':''} srcDoc={previewSrc}/></div></div></div>}
 
