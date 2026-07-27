@@ -297,6 +297,13 @@ function replaceBodyContent(source: string, bodyHtml: string) {
   const parser = new DOMParser();
   const documentNode = parser.parseFromString(source, 'text/html');
   documentNode.body.innerHTML = bodyHtml;
+
+  documentNode
+    .querySelectorAll(
+      'script[data-canvasforge-editor-bridge], script[data-canvasforge-js]'
+    )
+    .forEach((node) => node.remove());
+
   return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
 }
 
@@ -379,7 +386,11 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
   const sendDocument = () => {
     const clone = document.body.cloneNode(true);
     cleanEditorState(clone);
-    clone.querySelectorAll('script[data-canvasforge-editor-bridge]').forEach((node) => node.remove());
+    clone
+      .querySelectorAll(
+        'script[data-canvasforge-editor-bridge], script[data-canvasforge-js]'
+      )
+      .forEach((node) => node.remove());
 
     parent.postMessage({
       source: 'canvasforge-visual-editor',
