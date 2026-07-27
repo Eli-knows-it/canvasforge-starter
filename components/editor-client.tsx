@@ -870,7 +870,7 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
             control.closest('label')?.textContent ||
             control.getAttribute('placeholder') ||
             control.getAttribute('aria-label') ||
-            `field-${index + 1}`;
+            'field-' + (index + 1);
 
           const normalizedName = labelText
             .toLowerCase()
@@ -880,7 +880,7 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
 
           control.setAttribute(
             'name',
-            normalizedName || `field-${index + 1}`
+            normalizedName || 'field-' + (index + 1)
           );
         }
       });
