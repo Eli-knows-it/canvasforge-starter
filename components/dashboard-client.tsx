@@ -20,6 +20,10 @@ export function DashboardClient() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
+  const publicBaseUrl =
+    process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ||
+    'https://canvasforge-starter.vercel.app/published';
+
   useEffect(() => {
     void loadSites();
   }, []);
@@ -87,11 +91,9 @@ export function DashboardClient() {
   }
 
   async function deleteSite(site: Site) {
-    const accepted = window.confirm(`Delete “${site.name}”? This cannot be undone.`);
-    if (!accepted) return;
+    if (!window.confirm(`Delete “${site.name}”? This cannot be undone.`)) return;
     try {
-      const supabase = getSupabase();
-      const { error: deleteError } = await supabase.from('sites').delete().eq('id', site.id);
+      const { error: deleteError } = await getSupabase().from('sites').delete().eq('id', site.id);
       if (deleteError) throw deleteError;
       setSites((current) => current.filter((item) => item.id !== site.id));
     } catch (caught) {
@@ -100,8 +102,7 @@ export function DashboardClient() {
   }
 
   async function signOut() {
-    const supabase = getSupabase();
-    await supabase.auth.signOut();
+    await getSupabase().auth.signOut();
     router.push('/login');
   }
 
@@ -122,7 +123,7 @@ export function DashboardClient() {
         <div className="page-heading">
           <div>
             <h1>Your websites</h1>
-            <p>Import AI-generated code, visually edit it, autosave, preview, and export.</p>
+            <p>Paste or import complete website code, preview it exactly, and publish it.</p>
           </div>
           <button className="button-primary" onClick={() => setShowCreate(true)}>Create website</button>
         </div>
@@ -132,29 +133,32 @@ export function DashboardClient() {
             <div className="empty-state">
               <div className="logo-mark" style={{ margin: 'auto' }}>+</div>
               <h2>Create your first website</h2>
-              <p>Start with a template or paste a complete HTML, CSS, and JavaScript site.</p>
+              <p>Paste HTML, CSS, and JavaScript or import a complete website ZIP.</p>
               <button className="button-primary" onClick={() => setShowCreate(true)}>Create website</button>
             </div>
-          ) : sites.map((site) => (
-            <article className="site-card" key={site.id}>
-              <div className="site-preview">
-                <div className="site-preview-inner">
-                  <div className="mini-line bold"/>
-                  <div className="mini-line" style={{ width: '90%' }}/>
-                  <div className="mini-line" style={{ width: '66%' }}/>
+          ) : sites.map((site) => {
+            const liveUrl = `${publicBaseUrl.replace(/\/$/, '')}/${site.slug}`;
+            return (
+              <article className="site-card" key={site.id}>
+                <div className="site-preview">
+                  <div className="site-preview-inner">
+                    <div className="mini-line bold"/>
+                    <div className="mini-line" style={{ width: '90%' }}/>
+                    <div className="mini-line" style={{ width: '66%' }}/>
+                  </div>
                 </div>
-              </div>
-              <div className="site-card-body">
-                <div className="site-title-row"><h2 className="site-title">{site.name}</h2></div>
-                <p className="site-meta">{site.is_published ? 'Published' : 'Draft'} · Updated {new Date(site.updated_at).toLocaleString()}</p>
-                <div className="site-actions">
-                  <Link className="button-primary button-small" href={`/editor/${site.id}`}>Edit</Link>
-                  {site.is_published && <a className="button-secondary button-small" href={`https://${site.slug}.${process.env.NEXT_PUBLIC_ROOT_DOMAIN || 'canvasforge.com'}`} target="_blank" rel="noreferrer">View live</a>}
-                  <button className="button-danger button-small" onClick={() => deleteSite(site)}>Delete</button>
+                <div className="site-card-body">
+                  <div className="site-title-row"><h2 className="site-title">{site.name}</h2></div>
+                  <p className="site-meta">{site.is_published ? 'Published' : 'Draft'} · Updated {new Date(site.updated_at).toLocaleString()}</p>
+                  <div className="site-actions">
+                    <Link className="button-primary button-small" href={`/editor/${site.id}`}>Open code</Link>
+                    {site.is_published && <a className="button-secondary button-small" href={liveUrl} target="_blank" rel="noreferrer">View live</a>}
+                    <button className="button-danger button-small" onClick={() => void deleteSite(site)}>Delete</button>
+                  </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </section>
       </main>
 
@@ -170,7 +174,7 @@ export function DashboardClient() {
             </div>
             <div className="modal-footer">
               <button type="button" className="button-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
-              <button className="button-primary" disabled={creating}>{creating ? 'Creating…' : 'Create and edit'}</button>
+              <button className="button-primary" disabled={creating}>{creating ? 'Creating…' : 'Create code project'}</button>
             </div>
           </form>
         </div>
