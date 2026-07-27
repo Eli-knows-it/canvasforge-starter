@@ -43,6 +43,11 @@ type SelectedElement = {
   isText: boolean;
   isImage: boolean;
   isForm: boolean;
+  href?: string;
+  target?: string;
+  domId?: string;
+  className?: string;
+  textHint?: string;
 };
 
 const PAGE_TEMPLATES: Record<string, Omit<PageRecord, 'id'>> = {
@@ -328,6 +333,10 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     [data-canvasforge-selected="true"] {
       outline: 3px solid #635bff !important;
       outline-offset: 2px !important;
+      resize: both !important;
+      overflow: auto !important;
+      min-width: 20px !important;
+      min-height: 20px !important;
     }
     [data-canvasforge-hover="true"] {
       outline: 2px dashed rgba(99,91,255,.7) !important;
@@ -361,7 +370,11 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     @keyframes canvasforgeBounce { 50% { transform:translateY(-14px) } }
   \`;
   document.head.appendChild(style);
-  if (gridModeEnabled) document.body.setAttribute('data-canvasforge-grid', 'true');
+  if (gridModeEnabled) {
+    document.body.setAttribute('data-canvasforge-grid', 'true');
+    document.body.style.position = document.body.style.position || 'relative';
+    document.body.style.minHeight = Math.max(document.body.scrollHeight, window.innerHeight) + 'px';
+  }
 
   const ensureId = (element) => {
     if (!element.getAttribute(EDITOR_ATTRIBUTE)) {
@@ -395,7 +408,8 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     parent.postMessage({
       source: 'canvasforge-visual-editor',
       type: 'document-change',
-      bodyHtml: clone.innerHTML
+      bodyHtml: clone.innerHTML,
+      scrollY: window.scrollY
     }, '*');
   };
 
@@ -417,7 +431,12 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
         'p','h1','h2','h3','h4','h5','h6','span','a','button','label','li','strong','em','small','blockquote'
       ].includes(tag),
       isImage: tag === 'img',
-      isForm: tag === 'form' || Boolean(element.closest('form'))
+      isForm: tag === 'form' || Boolean(element.closest('form')),
+      href: element.closest('a')?.getAttribute('href') || '',
+      target: element.closest('a')?.getAttribute('target') || '',
+      domId: element.id || '',
+      className: element.className || '',
+      textHint: text.slice(0, 80)
     };
   };
 
@@ -499,10 +518,6 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     selection?.addRange(range);
   }, true);
 
-  document.addEventListener('input', () => {
-    sendDocument();
-  }, true);
-
   document.addEventListener('blur', (event) => {
     const element = event.target;
     if (element instanceof HTMLElement && element.hasAttribute('contenteditable')) {
@@ -511,10 +526,20 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     }
   }, true);
 
+  document.addEventListener('pointerup', () => {
+    if (selected) sendDocument();
+  }, true);
+
   document.addEventListener('dragstart', (event) => {
     const element = event.target;
     if (!(element instanceof HTMLElement) || element === document.body) return;
     dragged = element;
+    const computed = getComputedStyle(element);
+    element.dataset.canvasforgeDragFont = computed.fontFamily;
+    element.dataset.canvasforgeDragSize = computed.fontSize;
+    element.dataset.canvasforgeDragWeight = computed.fontWeight;
+    element.dataset.canvasforgeDragColor = computed.color;
+    element.dataset.canvasforgeDragBackground = computed.backgroundColor;
     dragged.setAttribute('data-canvasforge-dragging', 'true');
     event.dataTransfer?.setData('text/plain', ensureId(dragged));
     if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
@@ -536,15 +561,22 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     if (target === dragged || dragged.contains(target)) return;
 
     if (gridModeEnabled) {
-      const bodyRect = document.body.getBoundingClientRect();
-      const left = Math.max(0, Math.round((event.clientX - bodyRect.left) / GRID_SIZE) * GRID_SIZE);
-      const top = Math.max(0, Math.round((event.clientY - bodyRect.top + window.scrollY) / GRID_SIZE) * GRID_SIZE);
+      const left = Math.max(0, Math.round(event.pageX / GRID_SIZE) * GRID_SIZE);
+      const top = Math.max(0, Math.round(event.pageY / GRID_SIZE) * GRID_SIZE);
       dragged.style.position = 'absolute';
       dragged.style.left = left + 'px';
       dragged.style.top = top + 'px';
       dragged.style.margin = '0';
       dragged.style.zIndex = '10';
+      dragged.style.fontFamily = dragged.dataset.canvasforgeDragFont || dragged.style.fontFamily;
+      dragged.style.fontSize = dragged.dataset.canvasforgeDragSize || dragged.style.fontSize;
+      dragged.style.fontWeight = dragged.dataset.canvasforgeDragWeight || dragged.style.fontWeight;
+      dragged.style.color = dragged.dataset.canvasforgeDragColor || dragged.style.color;
+      if (dragged.dataset.canvasforgeDragBackground && dragged.dataset.canvasforgeDragBackground !== 'rgba(0, 0, 0, 0)') {
+        dragged.style.backgroundColor = dragged.dataset.canvasforgeDragBackground;
+      }
       document.body.appendChild(dragged);
+      document.body.style.minHeight = Math.max(document.body.scrollHeight, top + dragged.offsetHeight + 80) + 'px';
     } else {
       const rect = target.getBoundingClientRect();
       const after = event.clientY > rect.top + rect.height / 2;
@@ -690,6 +722,50 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       return;
     }
 
+    if (message.type === 'restore-scroll') {
+      window.scrollTo({ top: Number(message.scrollY) || 0, behavior: 'auto' });
+      return;
+    }
+
+    if (message.type === 'insert-text') {
+      const text = document.createElement('div');
+      text.textContent = message.text || 'New text';
+      text.style.fontFamily = message.fontFamily || 'inherit';
+      text.style.fontSize = message.fontSize || '32px';
+      text.style.color = message.color || '#111111';
+      text.style.position = gridModeEnabled ? 'absolute' : 'relative';
+      if (gridModeEnabled) { text.style.left = '40px'; text.style.top = '40px'; }
+      text.setAttribute('draggable', 'true');
+      ensureId(text);
+      document.body.appendChild(text);
+      selectElement(text);
+      sendDocument();
+      return;
+    }
+
+    if (message.type === 'apply-link') {
+      const href = String(message.href || '').trim();
+      let anchor = element.closest('a');
+      if (!href) {
+        if (anchor && anchor !== element) anchor.replaceWith(...Array.from(anchor.childNodes));
+        else if (anchor) anchor.removeAttribute('href');
+        sendDocument();
+        return;
+      }
+      if (!anchor) {
+        anchor = document.createElement('a');
+        element.replaceWith(anchor);
+        anchor.appendChild(element);
+      }
+      anchor.setAttribute('href', href);
+      if (message.target === '_blank') anchor.setAttribute('target', '_blank');
+      else anchor.removeAttribute('target');
+      ensureId(anchor);
+      selectElement(element);
+      sendDocument();
+      return;
+    }
+
     if (message.type === 'update-form') {
       const form = element.tagName.toLowerCase() === 'form' ? element : element.closest('form');
       if (!(form instanceof HTMLFormElement)) return;
@@ -795,6 +871,8 @@ export function EditorClient() {
   const historyRef = useRef<HistorySnapshot[]>([]);
   const historyIndexRef = useRef(-1);
   const applyingHistoryRef = useRef(false);
+  const pendingVisualScrollRef = useRef(0);
+  const codeEditingRef = useRef(false);
 
   const [site, setSite] = useState<Site | null>(null);
   const [html, setHtml] = useState('');
@@ -827,6 +905,7 @@ export function EditorClient() {
     useState<SaveState>('saved');
   const [error, setError] = useState('');
   const [showPublish, setShowPublish] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
   const [showFormSettings, setShowFormSettings] = useState(false);
   const [publishSlug, setPublishSlug] = useState('');
   const [formEmail, setFormEmail] = useState('');
@@ -842,6 +921,8 @@ export function EditorClient() {
   );
   const [formButtonText, setFormButtonText] = useState('Send message');
   const [formShowPhone, setFormShowPhone] = useState(true);
+  const [selectedHref, setSelectedHref] = useState('');
+  const [selectedTargetBlank, setSelectedTargetBlank] = useState(false);
 
   const publicBaseUrl =
     process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ||
@@ -886,6 +967,7 @@ export function EditorClient() {
       }
 
       if (message.type === 'document-change') {
+        pendingVisualScrollRef.current = Number(message.scrollY) || 0;
         const updatedHtml = replaceBodyContent(
           htmlRef.current,
           message.bodyHtml || ''
@@ -902,8 +984,20 @@ export function EditorClient() {
       if (message.type === 'selection-change') {
         const nextSelected = message.element as SelectedElement;
         setSelected(nextSelected);
-        setTab('html');
-        window.setTimeout(() => highlightCodeForElement(nextSelected.id), 0);
+        setSelectedHref(nextSelected.href || '');
+        setSelectedTargetBlank(nextSelected.target === '_blank');
+        if (!codeEditingRef.current) {
+          setTab('html');
+          window.setTimeout(() => highlightCodeForElement(nextSelected.id, nextSelected), 0);
+        }
+        return;
+      }
+
+      if (message.type === 'ready' && pendingVisualScrollRef.current > 0) {
+        window.setTimeout(() => postToPreview({
+          type: 'restore-scroll',
+          scrollY: pendingVisualScrollRef.current
+        }), 30);
       }
     }
 
@@ -1064,12 +1158,26 @@ export function EditorClient() {
     updateHistoryButtons();
   }
 
-  function highlightCodeForElement(id: string) {
+  function highlightCodeForElement(id: string, elementHint?: SelectedElement) {
     const textarea = codeTextareaRef.current;
     if (!textarea) return;
 
     const marker = `data-canvasforge-editor-id="${id}"`;
-    const markerIndex = htmlRef.current.indexOf(marker);
+    let markerIndex = htmlRef.current.indexOf(marker);
+
+    if (markerIndex < 0 && elementHint?.domId) {
+      markerIndex = htmlRef.current.indexOf(`id="${elementHint.domId}"`);
+    }
+
+    if (markerIndex < 0 && elementHint?.className) {
+      const firstClass = elementHint.className.split(/\s+/).find(Boolean);
+      if (firstClass) markerIndex = htmlRef.current.indexOf(firstClass);
+    }
+
+    if (markerIndex < 0 && elementHint?.textHint) {
+      markerIndex = htmlRef.current.indexOf(elementHint.textHint.slice(0, 36));
+    }
+
     if (markerIndex < 0) return;
 
     const start = htmlRef.current.lastIndexOf('<', markerIndex);
@@ -1134,7 +1242,22 @@ export function EditorClient() {
   }
 
   function addPage() {
-    const template = PAGE_TEMPLATES[pageTemplate] || PAGE_TEMPLATES.blank;
+    let template = PAGE_TEMPLATES[pageTemplate] || PAGE_TEMPLATES.blank;
+    if (pageTemplate === 'current-layout') {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlRef.current, 'text/html');
+      const header = doc.querySelector('header')?.outerHTML || '';
+      const footer = doc.querySelector('footer')?.outerHTML || '';
+      template = {
+        name: 'New page',
+        path: 'page',
+        title: 'New page',
+        description: '',
+        html: `<!doctype html><html><head></head><body>${header}<main style="min-height:60vh;padding:64px"><h1>New page</h1><p>Start building here.</p></main>${footer}</body></html>`,
+        css: cssRef.current,
+        javascript: javascriptRef.current
+      };
+    }
     const nextPages = syncActivePage();
     const basePath = template.path || 'page';
     let path = basePath;
@@ -1468,52 +1591,54 @@ export function EditorClient() {
     }
   }
 
-  async function replaceSelectedImage(
+  async function uploadImages(
     event: ChangeEvent<HTMLInputElement>
   ) {
-    const file = event.target.files?.[0];
-
-    if (!file) return;
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
 
     setUploadingImage(true);
     setError('');
 
     try {
-      if (
-        !file.type.startsWith('image/') ||
-        file.size > 12 * 1024 * 1024
-      ) {
-        throw new Error(
-          'Choose an image no larger than 12 MB.'
-        );
-      }
-
-      const url = await uploadAsset(file, file.name);
-
-      if (selected?.isImage) {
-        postToPreview({
-          type: 'replace-image',
-          id: selected.id,
-          url,
-          alt: file.name.replace(/\.[^.]+$/, '')
-        });
-      } else {
-        postToPreview({
-          type: 'insert-image',
-          url,
-          alt: file.name.replace(/\.[^.]+$/, '')
-        });
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        if (!file.type.startsWith('image/') || file.size > 12 * 1024 * 1024) {
+          throw new Error(`${file.name}: choose an image no larger than 12 MB.`);
+        }
+        const url = await uploadAsset(file, file.name);
+        if (index === 0 && selected?.isImage && files.length === 1) {
+          postToPreview({ type: 'replace-image', id: selected.id, url, alt: file.name.replace(/\.[^.]+$/, '') });
+        } else {
+          postToPreview({ type: 'insert-image', url, alt: file.name.replace(/\.[^.]+$/, '') });
+        }
       }
     } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : 'Image upload failed.'
-      );
+      setError(caught instanceof Error ? caught.message : 'Image upload failed.');
     } finally {
       setUploadingImage(false);
       event.target.value = '';
     }
+  }
+
+  function addText() {
+    postToPreview({
+      type: 'insert-text',
+      text: 'New text',
+      fontFamily,
+      fontSize: `${Math.max(1, Number(selectedFontSize) || 32)}px`,
+      color: selectedTextColor
+    });
+  }
+
+  function applyLink() {
+    if (!selected) { setError('Select an element first.'); return; }
+    postToPreview({
+      type: 'apply-link',
+      id: selected.id,
+      href: selectedHref,
+      target: selectedTargetBlank ? '_blank' : ''
+    });
   }
 
   function addShape(kind: 'rectangle' | 'circle' | 'line') {
@@ -1770,8 +1895,9 @@ export function EditorClient() {
             ref={imageInput}
             type="file"
             accept="image/*"
+            multiple
             hidden
-            onChange={replaceSelectedImage}
+            onChange={uploadImages}
           />
 
           <button
@@ -1789,7 +1915,7 @@ export function EditorClient() {
             onClick={() => imageInput.current?.click()}
             disabled={uploadingImage}
           >
-            {uploadingImage ? 'Uploading…' : '+ Photo'}
+            {uploadingImage ? 'Uploading…' : '+ Photos'}
           </button>
 
           <button
@@ -1798,6 +1924,14 @@ export function EditorClient() {
             onClick={addContactForm}
           >
             + Contact form
+          </button>
+
+          <button
+            className="button-ghost button-small"
+            style={{ color: 'white' }}
+            onClick={() => setShowPreview(true)}
+          >
+            Preview
           </button>
 
           <button
@@ -1917,6 +2051,9 @@ export function EditorClient() {
               <option value="bounce">Bounce</option>
             </select>
             <button onClick={applySelectedStyles}>Apply style</button>
+            <input className="link-input" value={selectedHref} onChange={(event) => setSelectedHref(event.target.value)} placeholder="https://, /page, or #section" title="Link destination" />
+            <label><input type="checkbox" checked={selectedTargetBlank} onChange={(event) => setSelectedTargetBlank(event.target.checked)} /> New tab</label>
+            <button onClick={applyLink}>Apply link</button>
             {selected.isText && (
               <button
                 onClick={() =>
@@ -2012,6 +2149,44 @@ export function EditorClient() {
           `mode-${workspaceMode}`
         ].join(' ')}
       >
+        {workspaceMode === 'visual' && (
+          <aside className="hybrid-builder-sidebar visual-tools-sidebar">
+            <h3>Pages</h3>
+            <select className="input" value={activePageId} onChange={(event) => switchPage(event.target.value)}>
+              {pages.map((page) => <option key={page.id} value={page.id}>{page.name} {page.path ? `/${page.path}` : '/'}</option>)}
+            </select>
+            <select className="input" value={pageTemplate} onChange={(event) => setPageTemplate(event.target.value)}>
+              <option value="blank">Blank page</option>
+              <option value="current-layout">Current header + footer</option>
+              <option value="services">Services page</option>
+              <option value="product">Product/payment page</option>
+              <option value="login">Customer login page</option>
+              <option value="blog">Blog page</option>
+            </select>
+            <button className="button-secondary button-small" onClick={addPage}>Add page</button>
+            <button className="button-danger button-small" onClick={deleteActivePage}>Delete page</button>
+
+            <h3>Insert</h3>
+            <button className="button-secondary button-small" onClick={addText}>Text</button>
+            <button className="button-secondary button-small" onClick={() => imageInput.current?.click()}>Photos</button>
+            <div className="shape-buttons">
+              <button onClick={() => addShape('rectangle')}>Rectangle</button>
+              <button onClick={() => addShape('circle')}>Circle</button>
+              <button onClick={() => addShape('line')}>Line</button>
+            </div>
+            <button className="button-secondary button-small" onClick={addContactForm}>Contact form</button>
+
+            <h3>Fonts</h3>
+            <select className="input" value={fontFamily} onChange={(event) => setFontFamily(event.target.value)}>
+              {COMMON_FONTS.map((font) => <option key={font}>{font}</option>)}
+            </select>
+            <button className="button-secondary button-small" onClick={addGoogleFont}>Add font</button>
+            <input className="input" value={customFontUrl} onChange={(event) => setCustomFontUrl(event.target.value)} placeholder="Font stylesheet URL" />
+            <input className="input" value={customFontFamily} onChange={(event) => setCustomFontFamily(event.target.value)} placeholder="Font family name" />
+            <button className="button-secondary button-small" onClick={addCustomFont}>Add custom font</button>
+          </aside>
+        )}
+
         {workspaceMode !== 'visual' && (
           <>
             <aside className="hybrid-builder-sidebar">
@@ -2059,6 +2234,7 @@ export function EditorClient() {
                 </select>
                 <select className="input" value={pageTemplate} onChange={(event) => setPageTemplate(event.target.value)}>
                   <option value="blank">Blank page</option>
+                  <option value="current-layout">Current header + footer</option>
                   <option value="services">Services page</option>
                   <option value="product">Product/payment page</option>
                   <option value="login">Customer login page</option>
@@ -2070,6 +2246,7 @@ export function EditorClient() {
 
               <div className="code-tool-section">
                 <h3>Shapes</h3>
+                <button className="button-secondary button-small" onClick={addText}>Text</button>
                 <div className="shape-buttons">
                   <button onClick={() => addShape('rectangle')}>Rectangle</button>
                   <button onClick={() => addShape('circle')}>Circle</button>
@@ -2155,8 +2332,9 @@ export function EditorClient() {
                   onChange={(event) =>
                     updateHtml(event.target.value)
                   }
-                  onClick={(event) => selectVisualFromCode(event.currentTarget.selectionStart)}
-                  onKeyUp={(event) => selectVisualFromCode(event.currentTarget.selectionStart)}
+                  onFocus={() => { codeEditingRef.current = true; }}
+                  onBlur={() => { codeEditingRef.current = false; }}
+                  onDoubleClick={(event) => selectVisualFromCode(event.currentTarget.selectionStart)}
                   spellCheck={false}
                 />
               )}
@@ -2222,6 +2400,25 @@ export function EditorClient() {
           </div>
         )}
       </section>
+
+      {showPreview && (
+        <div className="modal-backdrop">
+          <div className="modal large preview-modal">
+            <div className="modal-header">
+              <h2>Website preview</h2>
+              <button className="button-ghost" onClick={() => setShowPreview(false)}>✕</button>
+            </div>
+            <div className="modal-body preview-modal-body">
+              <iframe
+                title="Website preview"
+                className="preview-frame"
+                sandbox="allow-scripts allow-forms allow-modals allow-popups allow-same-origin"
+                srcDoc={injectCode(html, css, javascript, false, true, false)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {showPublish && (
         <div className="modal-backdrop">
