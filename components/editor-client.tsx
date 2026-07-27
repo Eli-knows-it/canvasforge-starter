@@ -48,6 +48,8 @@ type SelectedElement = {
   domId?: string;
   className?: string;
   textHint?: string;
+  zIndex?: string;
+  position?: string;
 };
 
 const PAGE_TEMPLATES: Record<string, Omit<PageRecord, 'id'>> = {
@@ -436,7 +438,9 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       target: element.closest('a')?.getAttribute('target') || '',
       domId: element.id || '',
       className: element.className || '',
-      textHint: text.slice(0, 80)
+      textHint: text.slice(0, 80),
+      zIndex: getComputedStyle(element).zIndex || '',
+      position: getComputedStyle(element).position || ''
     };
   };
 
@@ -460,6 +464,13 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
 
   const findById = (id) =>
     document.querySelector('[' + EDITOR_ATTRIBUTE + '="' + CSS.escape(id) + '"]');
+
+  if (gridModeEnabled) {
+    document.documentElement.style.minHeight = '100%';
+    document.body.style.position = 'relative';
+    document.body.style.isolation = 'isolate';
+    document.body.style.minHeight = Math.max(document.body.scrollHeight, window.innerHeight) + 'px';
+  }
 
   document.querySelectorAll('body *').forEach((element) => {
     if (!(element instanceof HTMLElement)) return;
@@ -670,12 +681,28 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       const image = document.createElement('img');
       image.src = message.url || '';
       image.alt = message.alt || 'Uploaded image';
-      image.style.maxWidth = '100%';
+      image.style.width = message.width || '320px';
+      image.style.maxWidth = 'none';
       image.style.height = 'auto';
       image.style.display = 'block';
+
+      if (gridModeEnabled) {
+        document.body.style.position = 'relative';
+        document.body.style.isolation = 'isolate';
+        image.style.position = 'absolute';
+        image.style.left = Math.max(0, Number(message.left) || 40) + 'px';
+        image.style.top = Math.max(0, Number(message.top) || 40) + 'px';
+        image.style.zIndex = String(message.zIndex ?? 20);
+        image.style.margin = '0';
+      }
+
       image.setAttribute('draggable', 'true');
       ensureId(image);
       document.body.appendChild(image);
+      document.body.style.minHeight = Math.max(
+        document.body.scrollHeight,
+        (Number.parseFloat(image.style.top) || 0) + 500
+      ) + 'px';
       selectElement(image);
       sendDocument();
       return;
@@ -699,6 +726,23 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       ensureId(shape);
       document.body.appendChild(shape);
       selectElement(shape);
+      sendDocument();
+      return;
+    }
+
+    if (message.type === 'set-layer') {
+      if (message.layer === 'behind') {
+        element.style.position = element.style.position || 'absolute';
+        element.style.zIndex = '-1';
+        document.body.style.position = 'relative';
+        document.body.style.isolation = 'isolate';
+      } else if (message.layer === 'front') {
+        element.style.position = element.style.position || 'absolute';
+        element.style.zIndex = '999';
+      } else {
+        element.style.zIndex = String(message.zIndex ?? 10);
+      }
+      selectElement(element);
       sendDocument();
       return;
     }
@@ -870,6 +914,8 @@ export function EditorClient() {
   const javascriptRef = useRef('');
   const historyRef = useRef<HistorySnapshot[]>([]);
   const historyIndexRef = useRef(-1);
+  const pagesRef = useRef<PageRecord[]>([]);
+  const activePageIdRef = useRef('home');
   const applyingHistoryRef = useRef(false);
   const pendingVisualScrollRef = useRef(0);
   const codeEditingRef = useRef(false);
@@ -895,6 +941,7 @@ export function EditorClient() {
   const [selectedWidth, setSelectedWidth] = useState('');
   const [selectedHeight, setSelectedHeight] = useState('');
   const [selectedRotation, setSelectedRotation] = useState('0');
+  const [selectedZIndex, setSelectedZIndex] = useState('10');
   const [selectedAnimation, setSelectedAnimation] =
     useState<AnimationPreset>('none');
   const [pages, setPages] = useState<PageRecord[]>([]);
@@ -986,6 +1033,11 @@ export function EditorClient() {
         setSelected(nextSelected);
         setSelectedHref(nextSelected.href || '');
         setSelectedTargetBlank(nextSelected.target === '_blank');
+        setSelectedZIndex(
+          nextSelected.zIndex && nextSelected.zIndex !== 'auto'
+            ? nextSelected.zIndex
+            : '10'
+        );
         if (!codeEditingRef.current) {
           setTab('html');
           window.setTimeout(() => highlightCodeForElement(nextSelected.id, nextSelected), 0);
@@ -1207,8 +1259,14 @@ export function EditorClient() {
   }
 
   function syncActivePage(): PageRecord[] {
-    return pages.map((page) =>
-      page.id === activePageId
+    const currentPages = pagesRef.current.length
+      ? pagesRef.current
+      : pages;
+
+    const currentId = activePageIdRef.current || activePageId;
+
+    const updatedPages = currentPages.map((page) =>
+      page.id === currentId
         ? {
             ...page,
             html: htmlRef.current,
@@ -1217,53 +1275,90 @@ export function EditorClient() {
           }
         : page
     );
+
+    pagesRef.current = updatedPages;
+    return updatedPages;
+  }
+
+  function loadPageIntoEditor(page: PageRecord) {
+    activePageIdRef.current = page.id;
+    setActivePageId(page.id);
+
+    htmlRef.current = page.html;
+    cssRef.current = page.css;
+    javascriptRef.current = page.javascript;
+
+    setHtml(page.html);
+    setCss(page.css);
+    setJavascript(page.javascript);
+
+    historyRef.current = [
+      {
+        html: page.html,
+        css: page.css,
+        javascript: page.javascript
+      }
+    ];
+    historyIndexRef.current = 0;
+    updateHistoryButtons();
+    setSelected(null);
   }
 
   function switchPage(pageId: string) {
     const updatedPages = syncActivePage();
     setPages(updatedPages);
-    const nextPage = updatedPages.find((page) => page.id === pageId);
-    if (!nextPage) return;
 
-    setActivePageId(nextPage.id);
-    htmlRef.current = nextPage.html;
-    cssRef.current = nextPage.css;
-    javascriptRef.current = nextPage.javascript;
-    setHtml(nextPage.html);
-    setCss(nextPage.css);
-    setJavascript(nextPage.javascript);
-    historyRef.current = [{
-      html: nextPage.html,
-      css: nextPage.css,
-      javascript: nextPage.javascript
-    }];
-    historyIndexRef.current = 0;
-    updateHistoryButtons();
+    const nextPage = updatedPages.find(
+      (page) => page.id === pageId
+    );
+
+    if (!nextPage) return;
+    loadPageIntoEditor(nextPage);
   }
 
   function addPage() {
-    let template = PAGE_TEMPLATES[pageTemplate] || PAGE_TEMPLATES.blank;
+    const currentPages = syncActivePage();
+    let template =
+      PAGE_TEMPLATES[pageTemplate] ||
+      PAGE_TEMPLATES.blank;
+
     if (pageTemplate === 'current-layout') {
       const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlRef.current, 'text/html');
-      const header = doc.querySelector('header')?.outerHTML || '';
-      const footer = doc.querySelector('footer')?.outerHTML || '';
+      const doc = parser.parseFromString(
+        htmlRef.current,
+        'text/html'
+      );
+
+      const header =
+        doc.querySelector('header')?.outerHTML || '';
+      const footer =
+        doc.querySelector('footer')?.outerHTML || '';
+
       template = {
         name: 'New page',
         path: 'page',
         title: 'New page',
         description: '',
-        html: `<!doctype html><html><head></head><body>${header}<main style="min-height:60vh;padding:64px"><h1>New page</h1><p>Start building here.</p></main>${footer}</body></html>`,
+        html:
+          '<!doctype html><html><head></head><body>' +
+          header +
+          '<main style="min-height:60vh;padding:64px">' +
+          '<h1>New page</h1><p>Start building here.</p>' +
+          '</main>' +
+          footer +
+          '</body></html>',
         css: cssRef.current,
         javascript: javascriptRef.current
       };
     }
-    const nextPages = syncActivePage();
+
     const basePath = template.path || 'page';
     let path = basePath;
     let suffix = 2;
 
-    while (nextPages.some((page) => page.path === path)) {
+    while (
+      currentPages.some((page) => page.path === path)
+    ) {
       path = `${basePath}-${suffix}`;
       suffix += 1;
     }
@@ -1274,33 +1369,49 @@ export function EditorClient() {
       name: template.name,
       path
     };
-    setPages([...nextPages, page]);
-    setActivePageId(page.id);
-    htmlRef.current = page.html;
-    cssRef.current = page.css;
-    javascriptRef.current = page.javascript;
-    setHtml(page.html);
-    setCss(page.css);
-    setJavascript(page.javascript);
-    pushHistory();
-    markChanged();
+
+    const nextPages = [...currentPages, page];
+    pagesRef.current = nextPages;
+    setPages(nextPages);
+    loadPageIntoEditor(page);
+
+    setSaveState('unsaved');
+
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+    }
+
+    saveTimer.current = setTimeout(
+      () => void saveSite(nextPages, page.id),
+      250
+    );
   }
 
   function deleteActivePage() {
-    if (pages.length <= 1) {
+    const currentPages = syncActivePage();
+
+    if (currentPages.length <= 1) {
       setError('A website must keep at least one page.');
       return;
     }
 
-    const remaining = syncActivePage().filter(
-      (page) => page.id !== activePageId
+    const currentId =
+      activePageIdRef.current || activePageId;
+
+    const remaining = currentPages.filter(
+      (page) => page.id !== currentId
     );
+
+    pagesRef.current = remaining;
     setPages(remaining);
-    switchPage(remaining[0].id);
+    loadPageIntoEditor(remaining[0]);
     markChanged();
   }
 
-  async function saveSite() {
+  async function saveSite(
+    pagesOverride?: PageRecord[],
+    activePageOverride?: string
+  ) {
     const currentSite = siteRef.current;
     if (!currentSite) return;
 
@@ -1308,10 +1419,20 @@ export function EditorClient() {
     setError('');
 
     try {
-      const updatedPages = syncActivePage();
+      const updatedPages =
+        pagesOverride || syncActivePage();
+
+      pagesRef.current = updatedPages;
+
+      const currentActiveId =
+        activePageOverride ||
+        activePageIdRef.current ||
+        activePageId;
+
       const activePage =
-        updatedPages.find((page) => page.id === activePageId) ||
-        updatedPages[0];
+        updatedPages.find(
+          (page) => page.id === currentActiveId
+        ) || updatedPages[0];
 
       const payload = {
         html: activePage?.html || htmlRef.current,
@@ -1320,6 +1441,7 @@ export function EditorClient() {
         project_data: { pages: updatedPages },
         updated_at: new Date().toISOString()
       };
+      pagesRef.current = updatedPages;
       setPages(updatedPages);
 
       const { error: updateError } = await getSupabase()
@@ -1610,7 +1732,15 @@ export function EditorClient() {
         if (index === 0 && selected?.isImage && files.length === 1) {
           postToPreview({ type: 'replace-image', id: selected.id, url, alt: file.name.replace(/\.[^.]+$/, '') });
         } else {
-          postToPreview({ type: 'insert-image', url, alt: file.name.replace(/\.[^.]+$/, '') });
+          postToPreview({
+            type: 'insert-image',
+            url,
+            alt: file.name.replace(/\.[^.]+$/, ''),
+            left: 40 + index * 30,
+            top: 40 + index * 30,
+            width: '320px',
+            zIndex: 20 + index
+          });
         }
       }
     } catch (caught) {
@@ -1666,9 +1796,35 @@ export function EditorClient() {
         'font-size': `${Math.max(1, Number(selectedFontSize) || 16)}px`,
         width: selectedWidth ? `${Math.max(1, Number(selectedWidth))}px` : '',
         height: selectedHeight ? `${Math.max(1, Number(selectedHeight))}px` : '',
-        transform: `rotate(${rotation}deg)`
+        transform: `rotate(${rotation}deg)`,
+        'z-index': selectedZIndex || '10'
       },
       animation: selectedAnimation
+    });
+  }
+
+  function setSelectedLayer(
+    layer: 'behind' | 'normal' | 'front'
+  ) {
+    if (!selected) {
+      setError('Select an element first.');
+      return;
+    }
+
+    const zIndex =
+      layer === 'behind'
+        ? '-1'
+        : layer === 'front'
+          ? '999'
+          : '10';
+
+    setSelectedZIndex(zIndex);
+
+    postToPreview({
+      type: 'set-layer',
+      id: selected.id,
+      layer,
+      zIndex
     });
   }
 
@@ -2041,6 +2197,12 @@ export function EditorClient() {
             <label>
               Rotate <input className="mini-number" type="number" value={selectedRotation} onChange={(event) => setSelectedRotation(event.target.value)} />
             </label>
+            <label>
+              Layer <input className="mini-number" type="number" value={selectedZIndex} onChange={(event) => setSelectedZIndex(event.target.value)} />
+            </label>
+            <button onClick={() => setSelectedLayer('behind')}>Send behind</button>
+            <button onClick={() => setSelectedLayer('normal')}>Normal layer</button>
+            <button onClick={() => setSelectedLayer('front')}>Bring front</button>
             <select value={selectedAnimation} onChange={(event) => setSelectedAnimation(event.target.value as AnimationPreset)}>
               <option value="none">No animation</option>
               <option value="fade">Fade</option>
