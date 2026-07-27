@@ -24,8 +24,15 @@ export const defaultHtml = `
   <div class="card">
     <p class="eyebrow">LET'S CONNECT</p>
     <h2>Ready to take the next step?</h2>
-    <p>Add your contact details or connect this button to your preferred form service.</p>
-    <a class="button dark" href="mailto:hello@example.com">Email Us</a>
+    <p>Send a message using the form below.</p>
+    <form class="contact-form">
+      <label>Name<input name="name" required></label>
+      <label>Email<input name="email" type="email" required></label>
+      <label>Message<textarea name="message" required></textarea></label>
+      <input name="_cf_website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
+      <button class="button dark" type="submit">Send message</button>
+      <p data-canvasforge-status></p>
+    </form>
   </div>
 </section>`;
 
@@ -49,7 +56,11 @@ h1 { font-size: clamp(3rem, 8vw, 7rem); line-height: .92; letter-spacing: -.055e
 h2 { font-size: clamp(2rem, 4vw, 4rem); line-height: 1; letter-spacing: -.04em; margin: 12px 0 20px; }
 .lead { max-width: 720px; font-size: clamp(1.1rem, 2vw, 1.45rem); line-height: 1.6; color: #d6d9df; }
 .button { display: inline-block; margin-top: 22px; padding: 15px 22px; background: var(--accent); color: white; text-decoration: none; border-radius: 999px; font-weight: 800; }
-.button.dark { background: var(--ink); }
+.button.dark { background: var(--ink); border: 0; cursor: pointer; }
+.contact-form { display:grid; gap:14px; margin-top:24px; }
+.contact-form label { display:grid; gap:6px; font-weight:700; }
+.contact-form input, .contact-form textarea { width:100%; padding:12px; border:1px solid #c9c3b7; border-radius:10px; font:inherit; }
+.contact-form textarea { min-height:120px; }
 .section { padding: 92px clamp(24px, 6vw, 92px); }
 .section.alt { background: #ebe6dc; }
 .content-grid { max-width: 1120px; margin: auto; display: grid; grid-template-columns: 1.1fr .9fr; gap: 64px; align-items: end; }

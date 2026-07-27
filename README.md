@@ -1,92 +1,132 @@
-# CanvasForge Starter
+# CanvasForge Publisher
 
-CanvasForge is a working MVP for a multi-account visual website builder. Users can create accounts, manage their own websites, import AI-generated HTML/CSS/JavaScript, visually edit content, upload images, autosave changes, preview safely, and export a ZIP containing deployable code.
+A multi-account website builder that imports HTML/CSS/JS, visually edits it, uploads local images, publishes each site to a CanvasForge subdomain, and sends website forms to the owner's chosen email address.
 
-## Included features
+## Important: replace the old repository files
 
-- Email/password user accounts
-- User-owned website dashboard
-- PostgreSQL Row Level Security
-- Visual drag-and-drop editor powered by GrapesJS
-- Click-to-edit text and style controls for color, spacing, typography, and layout
-- HTML/CSS/JavaScript import
-- Full HTML document parsing
-- Image uploads to Supabase Storage
-- Autosave and manual save
-- Desktop, tablet, and mobile editing support
-- Sandboxed preview with custom JavaScript disabled by default
-- Export to `index.html`, `styles.css`, and `script.js`
+Upload this project with its folders intact. The root of GitHub must show folders such as `app`, `components`, `lib`, and `supabase`. Do not upload files one at a time or GitHub may flatten duplicate `page.tsx` files.
 
-## Stack
+## What changed
 
-- Next.js 16 and React 19
-- TypeScript
-- Supabase Auth, Postgres, Row Level Security, and Storage
-- GrapesJS
-- JSZip
+- Fixes the editor blank/loading bug by waiting for the editor container to exist before starting GrapesJS.
+- Adds **Import ZIP**. Upload a normal static website ZIP containing `index.html`, CSS, JavaScript, and image folders. Images are uploaded to Supabase Storage and local image paths are rewritten automatically.
+- Adds public publishing at `https://SITE.canvasforge.com`.
+- Adds publish/unpublish controls and globally unique subdomain slugs.
+- Adds a form recipient email setting per website.
+- Any normal HTML `<form>` on a published site is submitted to CanvasForge and delivered through Resend.
+- Keeps unpublished website code private through Supabase Row Level Security.
 
-## Local setup
+## 1. Update Supabase
 
-### 1. Create a Supabase project
+For an existing CanvasForge database:
 
-Create a project, open the SQL Editor, and run:
+1. Open Supabase.
+2. Open **SQL Editor**.
+3. Create a new query.
+4. Paste the full contents of `supabase/upgrade-publishing.sql`.
+5. Click **Run** once.
 
-`supabase/schema.sql`
+For a completely new Supabase project, run `supabase/schema.sql` instead.
 
-In **Authentication → URL Configuration**, add your local URL:
+Then open **Project Settings → API Keys** and copy:
 
-`http://localhost:3000`
+- Project URL
+- Publishable/anon key
+- `service_role` key
 
-For initial testing, you may disable email confirmation. For production, keep email verification enabled.
+The service-role key is secret. It belongs only in Vercel Environment Variables and must never be placed in GitHub or in a variable beginning with `NEXT_PUBLIC_`.
 
-### 2. Add environment variables
+## 2. Configure form email delivery with Resend
 
-Copy `.env.example` to `.env.local` and add the public project URL and public anonymous key from Supabase:
+1. Create a Resend account.
+2. Add and verify `canvasforge.com` in Resend.
+3. Create a Resend API key.
+4. Choose a sender address such as `forms@canvasforge.com`.
 
-```bash
-cp .env.example .env.local
+The application sends each website form to the email selected in that website's Publish settings. A form should contain named fields, for example:
+
+```html
+<form>
+  <input name="name" required>
+  <input name="email" type="email" required>
+  <textarea name="message" required></textarea>
+  <button type="submit">Send</button>
+  <p data-canvasforge-status></p>
+</form>
 ```
 
-Never put the Supabase service-role key in a `NEXT_PUBLIC_` variable or browser code.
+The included contact-form block already has spam-honeypot and status fields.
 
-### 3. Install and run
+## 3. Replace the GitHub project
 
-```bash
-npm install
-npm run dev
+Recommended safe approach:
+
+1. Extract this ZIP on your computer.
+2. Open the extracted `canvasforge-publisher` folder.
+3. Use GitHub Desktop to publish it as a new repository, or replace the contents of the existing repository while preserving all folders.
+4. Commit and push to the `main` branch.
+
+## 4. Set Vercel environment variables
+
+In **Vercel → CanvasForge project → Settings → Environment Variables**, add these to Production, Preview, and Development:
+
+```text
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
+NEXT_PUBLIC_ROOT_DOMAIN=canvasforge.com
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SECRET_SERVICE_ROLE_KEY
+RESEND_API_KEY=re_xxxxxxxxx
+RESEND_FROM_EMAIL=CanvasForge Forms <forms@canvasforge.com>
 ```
 
-Open `http://localhost:3000`.
+Redeploy after adding or changing variables.
 
-## Deploying at low or no initial cost
+## 5. Configure `canvasforge.com` and wildcard subdomains in Vercel
 
-The simplest deployment is:
+In the Vercel project:
 
-- **Application:** Vercel Hobby plan
-- **Database, authentication, images:** Supabase Free plan
-- **Exported customer websites:** Any static host that accepts HTML/CSS/JS, including Cloudflare Pages or similar services
+1. Open **Settings → Domains**.
+2. Add `canvasforge.com`.
+3. Add `www.canvasforge.com` if desired.
+4. Add `*.canvasforge.com` as a wildcard domain.
+5. Follow Vercel's nameserver instructions at your domain registrar.
 
-Push this folder to a private GitHub repository, import it into Vercel, add both environment variables, and deploy. Run the SQL schema only once in Supabase.
+Vercel requires its nameserver method for wildcard domains so it can issue wildcard SSL certificates. After DNS propagation, a published slug such as `demo` will resolve automatically at `https://demo.canvasforge.com`.
 
-Next.js can also run on a Node.js server or Docker host. Cloudflare deployment may require its current Next.js adapter or Workers deployment process.
+Reserve dashboard subdomains such as `www`, `app`, and `admin`; the editor currently blocks `www` in routing, and you should avoid assigning those slugs to customer sites.
 
-## Important publishing boundary
+## 6. Configure Supabase authentication URLs
 
-This starter exports customer websites as ZIP files. It intentionally does **not** publish arbitrary customer JavaScript on the CanvasForge dashboard's own domain.
+In **Supabase → Authentication → URL Configuration**:
 
-A secure hosted publishing system should deploy each website to a separate origin or isolated subdomain. That is the next major feature to build. Serving untrusted website JavaScript on the account application's origin could expose sessions, customer data, or administrative actions.
+- Site URL: your main CanvasForge Vercel URL or `https://canvasforge.com`
+- Redirect URL: add the same URL, and your Vercel preview URL if needed
 
-## Good next development phases
+Do not use wildcard customer subdomains as authentication callback URLs. Customer websites do not need CanvasForge login access.
 
-1. Custom subdomains and domains on a separate publishing origin
-2. Team members and roles: owner, administrator, editor, viewer
-3. Website versions, restore points, and audit history
-4. Reusable templates, global colors, fonts, headers, and footers
-5. Forms, submissions, email notifications, and spam protection
-6. Billing and subscription limits
-7. AI generation directly inside the editor
-8. Accessibility, performance, SEO, and security scans before publishing
+## 7. Test in this order
 
-## Production notes
+1. Register and sign in.
+2. Create a website.
+3. Confirm the visual editor is visible immediately.
+4. Double-click text and edit it.
+5. Import a static-site ZIP with `index.html` and image folders.
+6. Confirm images display in the editor and preview.
+7. Open **Publish**.
+8. Choose a subdomain and form-recipient email.
+9. Click **Save and publish**.
+10. Open `https://your-slug.canvasforge.com`.
+11. Submit a form and verify the recipient gets the email.
 
-Read `SECURITY.md`. No website can be guaranteed to “prevent hacking.” The proper goal is defense in depth, minimized permissions, isolation, patching, monitoring, testing, and rapid recovery.
+## Import limitations
+
+Import ZIP is intended for plain static sites. It handles HTML, CSS, JavaScript, and common image files. Projects that require React/Vite/Webpack compilation must first be exported or built into static browser files. Server-side PHP, WordPress themes, databases, and Node backends cannot be pasted into the visual editor as static HTML.
+
+## Security notes
+
+- Supabase RLS restricts draft ownership to the authenticated account.
+- The Supabase service-role key is used only in server routes.
+- Published website JavaScript executes on the customer website origin, not in the CanvasForge dashboard.
+- The form endpoint validates content type, limits field count and length, uses a honeypot, and does not expose the recipient email publicly.
+- Before charging customers, add CAPTCHA/Turnstile, durable rate limiting, malware scanning, audit logs, backups, dependency monitoring, and a professional penetration test.
+ 

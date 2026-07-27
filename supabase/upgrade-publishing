@@ -1,0 +1,16 @@
+-- Run this once in Supabase SQL Editor for an existing CanvasForge database.
+alter table public.sites add column if not exists is_published boolean not null default false;
+alter table public.sites add column if not exists published_at timestamptz;
+alter table public.sites add column if not exists form_email text;
+
+-- A subdomain must identify exactly one site across all accounts.
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'sites_slug_global_unique') then
+    alter table public.sites add constraint sites_slug_global_unique unique (slug);
+  end if;
+end $$;
+
+-- Published pages are read only by the server using the service-role key.
+-- Keep the sites table private from anonymous browser queries.
+revoke all on public.sites from anon;
+drop policy if exists "Anyone can view published websites" on public.sites;

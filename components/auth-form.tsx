@@ -67,3 +67,4 @@ export function AuthForm({ mode }: AuthFormProps) {
     </main>
   );
 }
+ 

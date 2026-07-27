@@ -22,3 +22,4 @@ export function getSupabase() {
 
   return browserClient;
 }
+ 

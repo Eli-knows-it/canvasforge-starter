@@ -2,23 +2,53 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FormEvent, useEffect, useState } from 'react';
-import { defaultCss, defaultHtml } from '@/lib/default-site';
+import {
+  FormEvent,
+  useEffect,
+  useState
+} from 'react';
+
+import {
+  defaultCss,
+  defaultHtml
+} from '@/lib/default-site';
 import { getSupabase } from '@/lib/supabase';
 import type { Site } from '@/lib/types';
 
-function makeSlug(name: string) {
-  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 54) || 'new-site';
+function makeSlug(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '')
+      .slice(0, 54) || 'new-site'
+  );
+}
+
+function formatUpdatedAt(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Recently';
+  }
+
+  return date.toLocaleString();
 }
 
 export function DashboardClient() {
   const router = useRouter();
+
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [siteName, setSiteName] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+
+  const publicBaseUrl =
+    process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ||
+    'https://canvasforge-starter.vercel.app/published';
 
   useEffect(() => {
     void loadSites();
@@ -27,146 +57,386 @@ export function DashboardClient() {
   async function loadSites() {
     setLoading(true);
     setError('');
+
     try {
       const supabase = getSupabase();
-      const { data: authData } = await supabase.auth.getUser();
+
+      const { data: authData } =
+        await supabase.auth.getUser();
+
       if (!authData.user) {
         router.replace('/login');
         return;
       }
-      const { data, error: fetchError } = await supabase
-        .from('sites')
-        .select('*')
-        .order('updated_at', { ascending: false });
-      if (fetchError) throw fetchError;
-      setSites((data ?? []) as Site[]);
+
+      const { data, error: fetchError } =
+        await supabase
+          .from('sites')
+          .select('*')
+          .order('updated_at', {
+            ascending: false
+          });
+
+      if (fetchError) {
+        throw fetchError;
+      }
+
+      setSites((data || []) as Site[]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to load websites.');
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Unable to load websites.'
+      );
     } finally {
       setLoading(false);
     }
   }
 
-  async function createSite(event: FormEvent) {
+  async function createSite(
+    event: FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
-    if (!siteName.trim()) return;
+
+    const cleanName = siteName.trim();
+
+    if (!cleanName) {
+      setError('Enter a website name.');
+      return;
+    }
+
     setCreating(true);
     setError('');
+
     try {
       const supabase = getSupabase();
-      const { data: authData } = await supabase.auth.getUser();
-      if (!authData.user) throw new Error('Your session has expired.');
 
-      const baseSlug = makeSlug(siteName);
-      const uniqueSlug = `${baseSlug}-${crypto.randomUUID().slice(0, 6)}`;
-      const { data, error: insertError } = await supabase
-        .from('sites')
-        .insert({
-          owner_id: authData.user.id,
-          name: siteName.trim(),
-          slug: uniqueSlug,
-          html: defaultHtml,
-          css: defaultCss,
-          javascript: '',
-          project_data: null
-        })
-        .select('*')
-        .single();
-      if (insertError) throw insertError;
+      const { data: authData } =
+        await supabase.auth.getUser();
+
+      if (!authData.user) {
+        throw new Error(
+          'Your session has expired. Please sign in again.'
+        );
+      }
+
+      const slug =
+        `${makeSlug(cleanName)}-` +
+        crypto.randomUUID().slice(0, 6);
+
+      const { data, error: insertError } =
+        await supabase
+          .from('sites')
+          .insert({
+            owner_id: authData.user.id,
+            name: cleanName,
+            slug,
+            html: defaultHtml,
+            css: defaultCss,
+            javascript: '',
+            project_data: null,
+            is_published: false,
+            published_at: null,
+            form_email: null
+          })
+          .select('*')
+          .single();
+
+      if (insertError) {
+        throw insertError;
+      }
+
       setShowCreate(false);
       setSiteName('');
+
       router.push(`/editor/${data.id}`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to create website.');
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Unable to create website.'
+      );
     } finally {
       setCreating(false);
     }
   }
 
   async function deleteSite(site: Site) {
-    const accepted = window.confirm(`Delete “${site.name}”? This cannot be undone.`);
-    if (!accepted) return;
+    const confirmed = window.confirm(
+      `Delete “${site.name}”? This cannot be undone.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError('');
+
     try {
-      const supabase = getSupabase();
-      const { error: deleteError } = await supabase.from('sites').delete().eq('id', site.id);
-      if (deleteError) throw deleteError;
-      setSites((current) => current.filter((item) => item.id !== site.id));
+      const { error: deleteError } =
+        await getSupabase()
+          .from('sites')
+          .delete()
+          .eq('id', site.id);
+
+      if (deleteError) {
+        throw deleteError;
+      }
+
+      setSites((currentSites) =>
+        currentSites.filter(
+          (currentSite) =>
+            currentSite.id !== site.id
+        )
+      );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to delete website.');
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Unable to delete website.'
+      );
     }
   }
 
   async function signOut() {
-    const supabase = getSupabase();
-    await supabase.auth.signOut();
+    await getSupabase().auth.signOut();
     router.push('/login');
   }
 
+  function getPublicUrl(site: Site): string {
+    return (
+      `${publicBaseUrl.replace(/\/$/, '')}/` +
+      site.slug
+    );
+  }
+
   if (loading) {
-    return <div className="loading-screen"><div><div className="spinner"/><p>Loading your websites…</p></div></div>;
+    return (
+      <div className="loading-screen">
+        <div>
+          <div className="spinner" />
+          <p>Loading your websites…</p>
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="shell">
       <header className="topbar">
-        <Link href="/dashboard" className="logo"><span className="logo-mark">C</span>CanvasForge</Link>
+        <Link
+          href="/dashboard"
+          className="logo"
+        >
+          <span className="logo-mark">C</span>
+          CanvasForge
+        </Link>
+
         <div className="nav-actions">
-          <button className="button-secondary button-small" onClick={() => setShowCreate(true)}>+ New website</button>
-          <button className="button-ghost button-small" onClick={signOut}>Sign out</button>
+          <button
+            type="button"
+            className="button-secondary button-small"
+            onClick={() => setShowCreate(true)}
+          >
+            + New website
+          </button>
+
+          <button
+            type="button"
+            className="button-ghost button-small"
+            onClick={() => void signOut()}
+          >
+            Sign out
+          </button>
         </div>
       </header>
+
       <main className="page">
         <div className="page-heading">
           <div>
             <h1>Your websites</h1>
-            <p>Import AI-generated code, visually edit it, autosave, preview, and export.</p>
+            <p>
+              Import code, edit visually, manage pages,
+              and publish.
+            </p>
           </div>
-          <button className="button-primary" onClick={() => setShowCreate(true)}>Create website</button>
+
+          <button
+            type="button"
+            className="button-primary"
+            onClick={() => setShowCreate(true)}
+          >
+            Create website
+          </button>
         </div>
-        {error && <div className="message-error" style={{ marginBottom: 18 }}>{error}</div>}
+
+        {error && (
+          <div
+            className="message-error"
+            role="alert"
+          >
+            {error}
+          </div>
+        )}
+
         <section className="site-grid">
           {sites.length === 0 ? (
             <div className="empty-state">
-              <div className="logo-mark" style={{ margin: 'auto' }}>+</div>
               <h2>Create your first website</h2>
-              <p>Start with a template or paste a complete HTML, CSS, and JavaScript site.</p>
-              <button className="button-primary" onClick={() => setShowCreate(true)}>Create website</button>
+              <p>
+                Start with a blank site, then paste code,
+                import a ZIP, or build visually.
+              </p>
+
+              <button
+                type="button"
+                className="button-primary"
+                onClick={() => setShowCreate(true)}
+              >
+                Create website
+              </button>
             </div>
-          ) : sites.map((site) => (
-            <article className="site-card" key={site.id}>
-              <div className="site-preview">
-                <div className="site-preview-inner">
-                  <div className="mini-line bold"/>
-                  <div className="mini-line" style={{ width: '90%' }}/>
-                  <div className="mini-line" style={{ width: '66%' }}/>
-                </div>
-              </div>
-              <div className="site-card-body">
-                <div className="site-title-row"><h2 className="site-title">{site.name}</h2></div>
-                <p className="site-meta">Updated {new Date(site.updated_at).toLocaleString()}</p>
-                <div className="site-actions">
-                  <Link className="button-primary button-small" href={`/editor/${site.id}`}>Edit</Link>
-                  <button className="button-danger button-small" onClick={() => deleteSite(site)}>Delete</button>
-                </div>
-              </div>
-            </article>
-          ))}
+          ) : (
+            sites.map((site) => {
+              const publicUrl = getPublicUrl(site);
+
+              return (
+                <article
+                  className="site-card"
+                  key={site.id}
+                >
+                  <div className="site-preview">
+                    <div className="site-preview-inner">
+                      <div className="mini-line bold" />
+                      <div className="mini-line" />
+                      <div className="mini-line" />
+                    </div>
+                  </div>
+
+                  <div className="site-card-body">
+                    <h2 className="site-title">
+                      {site.name}
+                    </h2>
+
+                    <p className="site-meta">
+                      {site.is_published
+                        ? 'Published'
+                        : 'Draft'}
+                      {' · '}
+                      Updated{' '}
+                      {formatUpdatedAt(site.updated_at)}
+                    </p>
+
+                    {site.is_published && (
+                      <p className="site-live-url">
+                        <a
+                          href={publicUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {publicUrl}
+                        </a>
+                      </p>
+                    )}
+
+                    <div className="site-actions">
+                      <Link
+                        className="button-primary button-small"
+                        href={`/editor/${site.id}`}
+                      >
+                        Edit
+                      </Link>
+
+                      {site.is_published && (
+                        <a
+                          className="button-secondary button-small"
+                          href={publicUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          View live
+                        </a>
+                      )}
+
+                      <button
+                        type="button"
+                        className="button-danger button-small"
+                        onClick={() =>
+                          void deleteSite(site)
+                        }
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })
+          )}
         </section>
       </main>
 
       {showCreate && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <form className="modal" style={{ maxWidth: 500 }} onSubmit={createSite}>
-            <div className="modal-header"><h2>Create a website</h2><button type="button" className="button-ghost" onClick={() => setShowCreate(false)}>✕</button></div>
+        <div className="modal-backdrop">
+          <form
+            className="modal"
+            onSubmit={createSite}
+          >
+            <div className="modal-header">
+              <h2>Create a website</h2>
+
+              <button
+                type="button"
+                className="button-ghost"
+                aria-label="Close"
+                onClick={() =>
+                  setShowCreate(false)
+                }
+              >
+                ×
+              </button>
+            </div>
+
             <div className="modal-body">
               <div className="field">
-                <label htmlFor="site-name">Website name</label>
-                <input id="site-name" className="input" value={siteName} onChange={(event) => setSiteName(event.target.value)} placeholder="My business website" autoFocus required maxLength={80}/>
+                <label htmlFor="site-name">
+                  Website name
+                </label>
+
+                <input
+                  id="site-name"
+                  className="input"
+                  value={siteName}
+                  onChange={(event) =>
+                    setSiteName(event.target.value)
+                  }
+                  placeholder="My new website"
+                  required
+                  autoFocus
+                />
               </div>
             </div>
+
             <div className="modal-footer">
-              <button type="button" className="button-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
-              <button className="button-primary" disabled={creating}>{creating ? 'Creating…' : 'Create and edit'}</button>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() =>
+                  setShowCreate(false)
+                }
+              >
+                Cancel
+              </button>
+
+              <button
+                type="submit"
+                className="button-primary"
+                disabled={creating}
+              >
+                {creating
+                  ? 'Creating…'
+                  : 'Create and edit'}
+              </button>
             </div>
           </form>
         </div>
