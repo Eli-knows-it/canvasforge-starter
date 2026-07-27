@@ -2,87 +2,76 @@ import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
-function escapeScript(source: string) {
+function escapeInlineScript(source: string) {
   return source.replace(/<\/script/gi, '<\\/script');
 }
 
-function buildDocument(site: {
+function buildPublishedDocument(site: {
   name: string;
   slug: string;
   html: string | null;
   css: string | null;
   javascript: string | null;
 }) {
-  const html = site.html || '';
+  const rawHtml = site.html?.trim() || '<!doctype html><html><head></head><body></body></html>';
   const css = site.css || '';
-  const javascript = escapeScript(site.javascript || '');
+  const javascript = escapeInlineScript(site.javascript || '');
 
-  // Forms stay inside the Vercel iframe, so they can post to CanvasForge's
-  // existing /api/forms/[slug] route without cross-origin problems.
-  const formBridge = `
-<script>
+  const formBridge = `<script data-canvasforge-form-bridge>
 (() => {
   const slug = ${JSON.stringify(site.slug)};
   document.addEventListener('submit', async (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
-
     event.preventDefault();
 
     const status = form.querySelector('[data-canvasforge-status]');
-    const submitButton = form.querySelector('[type="submit"]');
-
-    if (submitButton instanceof HTMLButtonElement) submitButton.disabled = true;
+    const submit = form.querySelector('[type="submit"]');
+    if (submit instanceof HTMLButtonElement) submit.disabled = true;
     if (status) status.textContent = 'Sending…';
 
     try {
-      const fields = Object.fromEntries(new FormData(form).entries());
       const response = await fetch('/api/forms/' + encodeURIComponent(slug), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields)
+        body: new FormData(form)
       });
-
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || 'Unable to send form.');
-
+      if (!response.ok) throw new Error(result.error || 'Unable to send message.');
       form.reset();
-      if (status) status.textContent = 'Thanks! Your message was sent.';
+      if (status) status.textContent = result.message || 'Thanks! Your message was sent.';
     } catch (error) {
-      if (status) {
-        status.textContent =
-          error instanceof Error ? error.message : 'Unable to send form.';
-      }
+      if (status) status.textContent = error instanceof Error ? error.message : 'Unable to send message.';
     } finally {
-      if (submitButton instanceof HTMLButtonElement) submitButton.disabled = false;
+      if (submit instanceof HTMLButtonElement) submit.disabled = false;
     }
   });
 })();
 </script>`;
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${site.name.replace(/[<>&"]/g, '')}</title>
-  <style>${css}</style>
-</head>
-<body>
-${html}
-${javascript ? `<script>${javascript}</script>` : ''}
-${formBridge}
-</body>
-</html>`;
+  const styleTag = css.trim() ? `<style data-canvasforge-css>\n${css}\n</style>` : '';
+  const scriptTag = javascript.trim() ? `<script data-canvasforge-js>\n${javascript}\n</script>` : '';
+
+  if (/<html[\s>]/i.test(rawHtml)) {
+    let output = rawHtml;
+    output = /<\/head>/i.test(output)
+      ? output.replace(/<\/head>/i, `${styleTag}</head>`)
+      : output.replace(/<html[^>]*>/i, (match) => `${match}<head><title>${site.name}</title>${styleTag}</head>`);
+    output = /<\/body>/i.test(output)
+      ? output.replace(/<\/body>/i, `${scriptTag}${formBridge}</body>`)
+      : `${output}${scriptTag}${formBridge}`;
+    return output;
+  }
+
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${site.name}</title>${styleTag}</head><body>${rawHtml}${scriptTag}${formBridge}</body></html>`;
 }
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   context: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await context.params;
-
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -107,20 +96,17 @@ export async function GET(
   }
 
   if (!site) {
-    return new NextResponse(
-      '<!doctype html><html><body style="font-family:system-ui;padding:40px"><h1>Website not found</h1><p>This website is not published.</p></body></html>',
-      {
-        status: 404,
-        headers: { 'content-type': 'text/html; charset=utf-8' }
-      }
-    );
+    return new NextResponse('<!doctype html><html><body style="font-family:system-ui;padding:40px"><h1>Website not found</h1><p>This website is not currently published.</p></body></html>', {
+      status: 404,
+      headers: { 'content-type': 'text/html; charset=utf-8' }
+    });
   }
 
-  return new NextResponse(buildDocument(site), {
+  return new NextResponse(buildPublishedDocument(site), {
     status: 200,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'public, max-age=60, s-maxage=60, stale-while-revalidate=300',
+      'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'strict-origin-when-cross-origin'
     }
