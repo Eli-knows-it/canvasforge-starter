@@ -130,3 +130,40 @@ Import ZIP is intended for plain static sites. It handles HTML, CSS, JavaScript,
 - The form endpoint validates content type, limits field count and length, uses a honeypot, and does not expose the recipient email publicly.
 - Before charging customers, add CAPTCHA/Turnstile, durable rate limiting, malware scanning, audit logs, backups, dependency monitoring, and a professional penetration test.
  
+CanvasForge V4 editor update
+
+Replace these complete files:
+
+components/editor-client.tsx
+
+app/globals.css
+
+No Supabase schema changes are required.
+
+Included
+
+Tool sidebar remains available in Visual-only mode.
+
+Multiple photo selection and upload.
+
+Text editing only synchronizes on blur, preventing constant iframe reloads.
+
+Visual scroll position is restored after a visual edit synchronizes.
+
+Clicking a visual element jumps the HTML editor to the likely matching tag.
+
+Code editing no longer triggers visual selection on every keystroke; double-click HTML to select the visual element.
+
+Grid dragging uses page coordinates and can place elements anywhere on the page.
+
+Critical computed typography and colors are preserved when an element moves to the freeform body grid.
+
+Selected elements get a browser resize handle in the lower-right corner.
+
+Text insertion, shapes, photos, contact forms, fonts, links, page templates, and current-header/footer pages.
+
+Preview modal restored.
+
+Existing AI links are read into the link field when selected.
+
+After committing to main, wait for Vercel to deploy and hard-refresh with Ctrl+Shift+R.
