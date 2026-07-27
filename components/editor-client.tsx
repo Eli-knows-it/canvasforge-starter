@@ -727,7 +727,6 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
     }
   });
 
-  sendDocument();
   parent.postMessage({
     source: 'canvasforge-visual-editor',
     type: 'ready'
