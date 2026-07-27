@@ -771,6 +771,37 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       return;
     }
 
+    if (message.type === 'insert-section-title') {
+      const container =
+        element instanceof HTMLFormElement
+          ? element.parentElement || element
+          : element;
+
+      const heading = document.createElement('h2');
+      heading.textContent = String(message.text || 'Section title');
+      heading.style.margin = '0 0 16px';
+      heading.style.fontFamily = message.fontFamily || 'inherit';
+      heading.style.fontSize = message.fontSize || '36px';
+      heading.style.color = message.color || 'inherit';
+      heading.setAttribute('draggable', 'true');
+      ensureId(heading);
+
+      if (
+        container instanceof HTMLInputElement ||
+        container instanceof HTMLTextAreaElement ||
+        container instanceof HTMLButtonElement ||
+        container instanceof HTMLImageElement
+      ) {
+        container.parentElement?.insertBefore(heading, container);
+      } else {
+        container.insertBefore(heading, container.firstChild);
+      }
+
+      selectElement(heading);
+      sendDocument();
+      return;
+    }
+
     if (message.type === 'insert-text') {
       const text = document.createElement('div');
       text.textContent = message.text || 'New text';
@@ -806,6 +837,71 @@ function editorBridgeScript(interactions: boolean, gridMode: boolean) {
       else anchor.removeAttribute('target');
       ensureId(anchor);
       selectElement(element);
+      sendDocument();
+      return;
+    }
+
+    if (message.type === 'recognize-form') {
+      const form =
+        element.tagName.toLowerCase() === 'form'
+          ? element
+          : element.closest('form');
+
+      if (!(form instanceof HTMLFormElement)) return;
+
+      form.setAttribute('data-canvasforge-form', 'true');
+      form.setAttribute('method', 'post');
+      form.removeAttribute('action');
+
+      const controls = Array.from(
+        form.querySelectorAll('input, textarea, select')
+      );
+
+      controls.forEach((control, index) => {
+        if (
+          control instanceof HTMLInputElement &&
+          ['submit', 'button', 'reset'].includes(control.type)
+        ) {
+          return;
+        }
+
+        if (!control.getAttribute('name')) {
+          const labelText =
+            control.closest('label')?.textContent ||
+            control.getAttribute('placeholder') ||
+            control.getAttribute('aria-label') ||
+            `field-${index + 1}`;
+
+          const normalizedName = labelText
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 60);
+
+          control.setAttribute(
+            'name',
+            normalizedName || `field-${index + 1}`
+          );
+        }
+      });
+
+      const possibleButton = form.querySelector(
+        'button, input[type="submit"]'
+      );
+
+      if (possibleButton instanceof HTMLButtonElement) {
+        possibleButton.type = 'submit';
+      }
+
+      if (!form.querySelector('[data-canvasforge-status]')) {
+        const status = document.createElement('p');
+        status.setAttribute('data-canvasforge-status', '');
+        status.setAttribute('aria-live', 'polite');
+        status.style.minHeight = '1.4em';
+        form.appendChild(status);
+      }
+
+      selectElement(form);
       sendDocument();
       return;
     }
@@ -970,6 +1066,7 @@ export function EditorClient() {
   const [formShowPhone, setFormShowPhone] = useState(true);
   const [selectedHref, setSelectedHref] = useState('');
   const [selectedTargetBlank, setSelectedTargetBlank] = useState(false);
+  const [sectionTitle, setSectionTitle] = useState('Section title');
 
   const publicBaseUrl =
     process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ||
@@ -1904,6 +2001,36 @@ export function EditorClient() {
     );
   }
 
+  function addTitleToSelectedSection() {
+    if (!selected) {
+      setError('Select the section or box first.');
+      return;
+    }
+
+    postToPreview({
+      type: 'insert-section-title',
+      id: selected.id,
+      text: sectionTitle.trim() || 'Section title',
+      fontFamily,
+      fontSize: `${Math.max(1, Number(selectedFontSize) || 36)}px`,
+      color: selectedTextColor
+    });
+  }
+
+  function recognizeSelectedForm() {
+    if (!selected?.isForm) {
+      setError('Select a form or an element inside the form first.');
+      return;
+    }
+
+    postToPreview({
+      type: 'recognize-form',
+      id: selected.id
+    });
+
+    setShowFormSettings(true);
+  }
+
   function openFormSettings() {
     if (!selected?.isForm) {
       setError(
@@ -1917,6 +2044,11 @@ export function EditorClient() {
 
   function applyFormSettings() {
     if (!selected) return;
+
+    postToPreview({
+      type: 'recognize-form',
+      id: selected.id
+    });
 
     postToPreview({
       type: 'update-form',
@@ -2213,6 +2345,16 @@ export function EditorClient() {
               <option value="bounce">Bounce</option>
             </select>
             <button onClick={applySelectedStyles}>Apply style</button>
+            <input
+              className="link-input"
+              value={sectionTitle}
+              onChange={(event) => setSectionTitle(event.target.value)}
+              placeholder="Title for selected section"
+              title="Add a selectable heading inside the selected box or section"
+            />
+            <button onClick={addTitleToSelectedSection}>
+              Add section title
+            </button>
             <input className="link-input" value={selectedHref} onChange={(event) => setSelectedHref(event.target.value)} placeholder="https://, /page, or #section" title="Link destination" />
             <label><input type="checkbox" checked={selectedTargetBlank} onChange={(event) => setSelectedTargetBlank(event.target.checked)} /> New tab</label>
             <button onClick={applyLink}>Apply link</button>
@@ -2243,9 +2385,14 @@ export function EditorClient() {
             )}
 
             {selected.isForm && (
-              <button onClick={openFormSettings}>
-                Form settings
-              </button>
+              <>
+                <button onClick={recognizeSelectedForm}>
+                  Recognize as form
+                </button>
+                <button onClick={openFormSettings}>
+                  Form settings
+                </button>
+              </>
             )}
 
             <button
