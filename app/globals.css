@@ -364,7 +364,7 @@ button:disabled { opacity: .55; cursor: not-allowed; transform: none !important;
 .hybrid-code-editor{
   background:#0b1020;
   border-right:1px solid #2b3444;
-}
+} 
 
 .hybrid-visual-editor{
   background:#e7ebf2;
