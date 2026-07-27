@@ -3,19 +3,57 @@
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
-import type { Editor } from 'grapesjs';
 import JSZip, { type JSZipObject } from 'jszip';
-import 'grapesjs/dist/css/grapes.min.css';
-import { downloadSiteZip } from '@/lib/export-site';
 import { getSupabase } from '@/lib/supabase';
 import type { Site } from '@/lib/types';
 
 type SaveState = 'saved' | 'saving' | 'unsaved' | 'error';
+type CodeTab = 'html' | 'css' | 'javascript';
+
+const COMMON_FONTS = [
+  'Arial',
+  'Arial Black',
+  'Alegreya',
+  'Archivo',
+  'Barlow',
+  'Barlow Condensed',
+  'Bebas Neue',
+  'Cabin',
+  'Cormorant Garamond',
+  'DM Sans',
+  'Fira Sans',
+  'IBM Plex Sans',
+  'Inter',
+  'Lato',
+  'Libre Baskerville',
+  'Manrope',
+  'Merriweather',
+  'Montserrat',
+  'Nunito',
+  'Open Sans',
+  'Oswald',
+  'Playfair Display',
+  'Poppins',
+  'Raleway',
+  'Roboto',
+  'Roboto Condensed',
+  'Source Sans 3',
+  'Ubuntu',
+  'Work Sans'
+];
+
+function sanitizeSlug(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 63);
+}
 
 function getMimeType(filename: string): string {
-  const extension = filename.split('.').pop()?.toLowerCase();
-
-  const mimeTypes: Record<string, string> = {
+  const extension = filename.split('.').pop()?.toLowerCase() || '';
+  const types: Record<string, string> = {
     html: 'text/html',
     htm: 'text/html',
     css: 'text/css',
@@ -24,7 +62,6 @@ function getMimeType(filename: string): string {
     json: 'application/json',
     txt: 'text/plain',
     xml: 'application/xml',
-
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',
     png: 'image/png',
@@ -33,277 +70,177 @@ function getMimeType(filename: string): string {
     avif: 'image/avif',
     svg: 'image/svg+xml',
     ico: 'image/x-icon',
-
     woff: 'font/woff',
     woff2: 'font/woff2',
     ttf: 'font/ttf',
     otf: 'font/otf',
-
     mp4: 'video/mp4',
     webm: 'video/webm',
     mp3: 'audio/mpeg',
     wav: 'audio/wav',
-
     pdf: 'application/pdf'
   };
-
-  return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
+  return types[extension] || 'application/octet-stream';
 }
 
-
-
-function previewDocument(html: string, css: string, javascript: string, runScripts: boolean) {
-  const safeScript = runScripts ? javascript.replace(/<\/script/gi, '<\\/script') : '';
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${html}${runScripts ? `<script>${safeScript}</script>` : ''}</body></html>`;
-}
-
-function splitFullHtml(source: string) {
-  if (!source.trim()) return { html: '', css: '', javascript: '' };
-  const parser = new DOMParser();
-  const documentNode = parser.parseFromString(source, 'text/html');
-  const styles = Array.from(documentNode.querySelectorAll('style')).map((node) => node.textContent ?? '').join('\n');
-  const scripts = Array.from(documentNode.querySelectorAll('script:not([src])')).map((node) => node.textContent ?? '').join('\n');
-  documentNode.querySelectorAll('style, script, link[rel="stylesheet"]').forEach((node) => node.remove());
-  return { html: documentNode.body.innerHTML || source, css: styles, javascript: scripts };
-}
-
-function normalizeAssetPath(value: string) {
-  const clean = decodeURIComponent(value.split('?')[0].split('#')[0])
+function normalizePath(path: string) {
+  return decodeURIComponent(path)
     .replace(/\\/g, '/')
-    .replace(/^\/+/, '');
-
-  const parts: string[] = [];
-  for (const part of clean.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') parts.pop();
-    else parts.push(part);
-  }
-  return parts.join('/');
+    .split('?')[0]
+    .split('#')[0]
+    .replace(/^\.\//, '')
+    .replace(/^\//, '');
 }
 
-function zipDirectory(path: string) {
-  const normalized = normalizeAssetPath(path);
+function dirname(path: string) {
+  const normalized = normalizePath(path);
   const index = normalized.lastIndexOf('/');
-  return index === -1 ? '' : normalized.slice(0, index);
+  return index < 0 ? '' : normalized.slice(0, index + 1);
 }
 
-function joinZipPath(baseDir: string, value: string) {
-  if (/^(?:[a-z]+:|\/\/|data:|blob:|#)/i.test(value.trim())) return '';
-  return normalizeAssetPath(`${baseDir ? `${baseDir}/` : ''}${value}`);
-}
-
-function buildAssetVariants(
-  assets: Map<string, string>,
-  siteRoot: string
-) {
-  const variants = new Map<string, string>();
-  const basenameCounts = new Map<string, number>();
-
-  for (const path of assets.keys()) {
-    const basename = path.split('/').pop() || path;
-    basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
+function resolveRelativePath(baseFile: string, reference: string) {
+  const cleanReference = normalizePath(reference);
+  if (!cleanReference || /^(https?:|data:|blob:|mailto:|tel:|#)/i.test(reference)) {
+    return cleanReference;
   }
 
-  for (const [fullPath, hostedUrl] of assets) {
-    const cleanPath = normalizeAssetPath(fullPath);
-    const relativePath = siteRoot && cleanPath.startsWith(`${siteRoot}/`)
-      ? cleanPath.slice(siteRoot.length + 1)
-      : cleanPath;
-    const basename = cleanPath.split('/').pop() || cleanPath;
+  const stack = dirname(baseFile).split('/').filter(Boolean);
+  for (const part of cleanReference.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') stack.pop();
+    else stack.push(part);
+  }
+  return stack.join('/');
+}
 
-    const candidates = [
-      cleanPath,
-      `./${cleanPath}`,
-      `/${cleanPath}`,
-      relativePath,
-      `./${relativePath}`,
-      `/${relativePath}`
-    ];
+function replaceReferences(source: string, replacements: Map<string, string>) {
+  let result = source;
+  const entries = [...replacements.entries()].sort((a, b) => b[0].length - a[0].length);
 
-    if (basenameCounts.get(basename) === 1) candidates.push(basename);
-
-    for (const candidate of candidates) {
-      if (candidate) variants.set(candidate, hostedUrl);
+  for (const [path, url] of entries) {
+    const clean = normalizePath(path);
+    const variants = new Set([path, clean, `./${clean}`, `/${clean}`]);
+    for (const variant of variants) {
+      if (variant) result = result.split(variant).join(url);
     }
   }
-
-  return variants;
+  return result;
 }
 
-function replaceAssetReferences(
-  source: string,
-  assets: Map<string, string>,
-  siteRoot: string
-) {
-  if (!source || assets.size === 0) return source;
+function injectCode(html: string, css: string, javascript: string) {
+  const source = html.trim() || '<!doctype html><html><head></head><body><main><h1>Start editing</h1></main></body></html>';
+  const safeScript = javascript.replace(/<\/script/gi, '<\\/script');
+  const styleTag = css.trim() ? `<style data-canvasforge-css>\n${css}\n</style>` : '';
+  const scriptTag = safeScript.trim() ? `<script data-canvasforge-js>\n${safeScript}\n</script>` : '';
 
-  const variants = buildAssetVariants(assets, siteRoot);
-  const keys = Array.from(variants.keys()).sort((a, b) => b.length - a.length);
-  if (!keys.length) return source;
-
-  const escaped = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(escaped.join('|'), 'g');
-
-  return source.replace(pattern, (matched) => variants.get(matched) || matched);
-}
-
-function findZipEntry(
-  files: JSZipObject[],
-  baseDir: string,
-  reference: string
-) {
-  const resolved = joinZipPath(baseDir, reference);
-  if (!resolved) return undefined;
-  return files.find((entry) => normalizeAssetPath(entry.name) === resolved);
-}
-
-
-function prepareEditorCanvas(editor: Editor) {
-  const frame = editor.Canvas.getFrameEl();
-  const documentNode = frame?.contentDocument;
-  if (!documentNode?.head || !documentNode.body) return;
-
-  let editorStyle = documentNode.querySelector<HTMLStyleElement>('[data-canvasforge-editor-style]');
-  if (!editorStyle) {
-    editorStyle = documentNode.createElement('style');
-    editorStyle.setAttribute('data-canvasforge-editor-style', 'true');
-    editorStyle.textContent = `
-      /* Show the completed design while keeping the canvas editable. */
-      .page-loader,
-      [class*="page-loader"],
-      [id*="page-loader"],
-      .preloader,
-      #preloader,
-      .loader-overlay {
-        display: none !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
-      }
-
-      .reveal,
-      [data-reveal],
-      [data-animate],
-      [class*="fade-in"],
-      [class*="animate-in"] {
-        opacity: 1 !important;
-        visibility: visible !important;
-        transform: none !important;
-      }
-
-      html { scroll-behavior: auto !important; }
-      body { min-height: 100vh; }
-      a, button, input, select, textarea { pointer-events: auto; }
-    `;
-    documentNode.head.appendChild(editorStyle);
+  if (/<html[\s>]/i.test(source)) {
+    let output = source;
+    output = /<\/head>/i.test(output)
+      ? output.replace(/<\/head>/i, `${styleTag}</head>`)
+      : output.replace(/<html[^>]*>/i, (match) => `${match}<head>${styleTag}</head>`);
+    output = /<\/body>/i.test(output)
+      ? output.replace(/<\/body>/i, `${scriptTag}</body>`)
+      : `${output}${scriptTag}`;
+    return output;
   }
 
-  documentNode.querySelectorAll('.page-loader, .preloader, #preloader, .loader-overlay').forEach((node) => {
-    (node as HTMLElement).style.display = 'none';
-  });
-  documentNode.querySelectorAll('.reveal, [data-reveal], [data-animate]').forEach((node) => {
-    node.classList.add('is-visible', 'visible', 'active');
-  });
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${styleTag}</head><body>${source}${scriptTag}</body></html>`;
 }
 
-function runEditorJavascript(editor: Editor, javascript: string, enabled: boolean) {
-  const frame = editor.Canvas.getFrameEl();
-  const frameWindow = frame?.contentWindow;
-  const documentNode = frame?.contentDocument;
-  if (!documentNode?.body || !frameWindow) return;
-
-  documentNode.querySelectorAll('[data-canvasforge-runtime]').forEach((node) => node.remove());
-  prepareEditorCanvas(editor);
-  if (!enabled || !javascript.trim()) return;
-
-  const guard = documentNode.createElement('script');
-  guard.setAttribute('data-canvasforge-runtime', 'guard');
-  guard.textContent = `
-    document.addEventListener('click', function(event) {
-      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-      if (link && !link.hasAttribute('data-canvasforge-allow-navigation')) event.preventDefault();
-    }, true);
-    document.addEventListener('submit', function(event) { event.preventDefault(); }, true);
-  `;
-  documentNode.body.appendChild(guard);
-
-  const runtime = documentNode.createElement('script');
-  runtime.setAttribute('data-canvasforge-runtime', 'custom');
-  runtime.textContent = `(() => {
-    try {
-      ${javascript.replace(/<\/script/gi, '<\\/script')}
-    } catch (error) {
-      console.error('CanvasForge editor JavaScript error:', error);
-    }
-  })();`;
-  documentNode.body.appendChild(runtime);
-
-  // Imported scripts frequently wait for these events. The editor iframe has
-  // already loaded, so trigger them after installing the script.
-  documentNode.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
-  frameWindow.dispatchEvent(new Event('load'));
-  window.setTimeout(() => prepareEditorCanvas(editor), 80);
+function insertBeforeBodyEnd(html: string, block: string) {
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${block}\n</body>`);
+  return `${html}\n${block}`;
 }
 
-function selectedComponentName(component: any) {
-  if (!component) return 'Nothing selected';
-  const tag = String(component.get?.('tagName') || component.get?.('type') || 'element').toLowerCase();
-  const attributes = component.getAttributes?.() || {};
-  const label = attributes['aria-label'] || attributes.alt || attributes.title;
-  return label ? `${tag}: ${label}` : tag;
-}
+const CONTACT_FORM_HTML = `
+<section class="canvasforge-contact-section" id="contact">
+  <div class="canvasforge-contact-wrap">
+    <div class="canvasforge-contact-copy">
+      <p class="canvasforge-contact-kicker">GET IN TOUCH</p>
+      <h2>Contact me</h2>
+      <p>Tell me a little about what you are looking for and I will get back to you.</p>
+    </div>
+    <form class="canvasforge-contact-form">
+      <label>
+        Name
+        <input type="text" name="name" autocomplete="name" required>
+      </label>
+      <label>
+        Email
+        <input type="email" name="email" autocomplete="email" required>
+      </label>
+      <label>
+        Phone
+        <input type="tel" name="phone" autocomplete="tel">
+      </label>
+      <label>
+        Message
+        <textarea name="message" rows="6" required></textarea>
+      </label>
+      <input name="_cf_website" tabindex="-1" autocomplete="off" aria-hidden="true" class="canvasforge-honeypot">
+      <button type="submit">Send message</button>
+      <p data-canvasforge-status aria-live="polite"></p>
+    </form>
+  </div>
+</section>`;
+
+const CONTACT_FORM_CSS = `
+.canvasforge-contact-section{padding:80px 24px;background:#f7f7f5;color:#111}
+.canvasforge-contact-wrap{width:min(1100px,100%);margin:auto;display:grid;grid-template-columns:minmax(0,.8fr) minmax(320px,1.2fr);gap:56px;align-items:start}
+.canvasforge-contact-kicker{font-size:.78rem;font-weight:800;letter-spacing:.16em;margin:0 0 14px}
+.canvasforge-contact-copy h2{font-size:clamp(2.4rem,6vw,5rem);line-height:.95;margin:0 0 22px}
+.canvasforge-contact-copy p{line-height:1.7;max-width:520px}
+.canvasforge-contact-form{display:grid;gap:18px}
+.canvasforge-contact-form label{display:grid;gap:8px;font-weight:700}
+.canvasforge-contact-form input,.canvasforge-contact-form textarea{width:100%;padding:13px 14px;border:1px solid #c9c9c3;background:#fff;color:#111;font:inherit}
+.canvasforge-contact-form textarea{resize:vertical}
+.canvasforge-contact-form button{justify-self:start;border:0;padding:14px 22px;background:#111;color:#fff;font:inherit;font-weight:800;cursor:pointer}
+.canvasforge-contact-form [data-canvasforge-status]{min-height:1.4em;margin:0}
+.canvasforge-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}
+@media(max-width:760px){.canvasforge-contact-wrap{grid-template-columns:1fr;gap:34px}}
+`;
 
 export function EditorClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const editorRef = useRef<Editor | null>(null);
-  const siteRef = useRef<Site | null>(null);
-  const javascriptRef = useRef('');
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const zipRef = useRef<HTMLInputElement | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const zipInput = useRef<HTMLInputElement | null>(null);
   const [site, setSite] = useState<Site | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [editorReady, setEditorReady] = useState(false);
-  const [liveCanvas, setLiveCanvas] = useState(false);
-  const [selectedElement, setSelectedElement] = useState('Nothing selected');
-  const [activeDevice, setActiveDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
-  const [saveState, setSaveState] = useState<SaveState>('saved');
+  const [html, setHtml] = useState('');
+  const [css, setCss] = useState('');
   const [javascript, setJavascript] = useState('');
-  const [showImport, setShowImport] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  const [tab, setTab] = useState<CodeTab>('html');
+  const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState<SaveState>('saved');
+  const [error, setError] = useState('');
   const [showPublish, setShowPublish] = useState(false);
-  const [runScripts, setRunScripts] = useState(false);
-  const [importBundle, setImportBundle] = useState('');
-  const [importHtml, setImportHtml] = useState('');
-  const [importCss, setImportCss] = useState('');
-  const [importJs, setImportJs] = useState('');
-  const [importTab, setImportTab] = useState<'bundle' | 'separate'>('bundle');
-  const [codeTab, setCodeTab] = useState<'html' | 'css' | 'javascript'>('html');
   const [publishSlug, setPublishSlug] = useState('');
   const [formEmail, setFormEmail] = useState('');
   const [publishing, setPublishing] = useState(false);
-  const [importingZip, setImportingZip] = useState(false);
-  const [uploadingImage, setUploadingImage] = useState(false);
-  const [error, setError] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [fontFamily, setFontFamily] = useState('Inter');
+  const [customFontUrl, setCustomFontUrl] = useState('');
+  const [customFontFamily, setCustomFontFamily] = useState('');
+
+  const publicBaseUrl =
+    process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ||
+    'https://canvasforge-starter.vercel.app/published';
+
+  const publicUrl = site
+    ? `${publicBaseUrl.replace(/\/$/, '')}/${site.slug}`
+    : '';
+
+  const previewDocument = useMemo(
+    () => injectCode(html, css, javascript),
+    [html, css, javascript]
+  );
 
   useEffect(() => {
     void loadSite();
     return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      editorRef.current?.destroy();
+      if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, [params.id]);
-
-  // The original starter initialized GrapesJS before #gjs existed. This waits until the site is rendered.
-  useEffect(() => {
-    if (!loading && site && !editorRef.current) void initializeEditor(site);
-  }, [loading, site?.id]);
-
-  useEffect(() => {
-    if (!editorReady || !editorRef.current) return;
-    const timer = window.setTimeout(() => runEditorJavascript(editorRef.current!, javascriptRef.current, liveCanvas), 120);
-    return () => window.clearTimeout(timer);
-  }, [editorReady, javascript, liveCanvas]);
 
   async function loadSite() {
     setLoading(true);
@@ -312,283 +249,100 @@ export function EditorClient() {
       const supabase = getSupabase();
       const { data: authData } = await supabase.auth.getUser();
       if (!authData.user) return router.replace('/login');
-      const { data, error: fetchError } = await supabase.from('sites').select('*').eq('id', params.id).single();
+
+      const { data, error: fetchError } = await supabase
+        .from('sites')
+        .select('*')
+        .eq('id', params.id)
+        .single();
       if (fetchError) throw fetchError;
+
       const loaded = data as Site;
-      siteRef.current = loaded;
-      javascriptRef.current = loaded.javascript || '';
-      setJavascript(loaded.javascript || '');
-      setPublishSlug(loaded.slug);
-      setFormEmail(loaded.form_email || '');
       setSite(loaded);
+      setHtml(loaded.html || '');
+      setCss(loaded.css || '');
+      setJavascript(loaded.javascript || '');
+      setPublishSlug(loaded.slug || '');
+      setFormEmail(loaded.form_email || '');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to load this website.');
+      setError(caught instanceof Error ? caught.message : 'Unable to load website.');
     } finally {
       setLoading(false);
     }
   }
 
-  async function initializeEditor(loadedSite: Site) {
-    const grapesjs = (await import('grapesjs')).default;
-    const editor = grapesjs.init({
-      container: '#gjs', height: '100%', width: 'auto', storageManager: false, fromElement: false,
-      selectorManager: { componentFirst: true },
-      canvas: { styles: [], scripts: [] },
-      deviceManager: { devices: [
-        { id: 'desktop', name: 'Desktop', width: '1440px' },
-        { id: 'tablet', name: 'Tablet', width: '768px', widthMedia: '992px' },
-        { id: 'mobile', name: 'Mobile', width: '390px', widthMedia: '575px' }
-      ]}
-    });
-    editor.BlockManager.add('section', { label: 'Section', category: 'Layout', content: '<section style="padding:80px 32px"><div style="max-width:1100px;margin:auto"><h2>New section</h2><p>Start writing here.</p></div></section>' });
-    editor.BlockManager.add('two-columns', { label: '2 columns', category: 'Layout', content: '<section style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px;padding:64px 32px"><div><h3>Column one</h3><p>Add content.</p></div><div><h3>Column two</h3><p>Add content.</p></div></section>' });
-    editor.BlockManager.add('heading', { label: 'Heading', category: 'Content', content: '<h2>New heading</h2>' });
-    editor.BlockManager.add('text', { label: 'Text', category: 'Content', content: '<p>Double-click to edit this text.</p>' });
-    editor.BlockManager.add('button', { label: 'Button', category: 'Content', content: '<a href="#" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#5b5cf0;color:#fff;text-decoration:none">Button</a>' });
-    editor.BlockManager.add('form', { label: 'Contact form', category: 'Content', content: '<form><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label><label>Message<textarea name="message" required></textarea></label><input name="_cf_website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true"><button type="submit">Send message</button><p data-canvasforge-status></p></form>' });
-    editor.BlockManager.add('image', { label: 'Image', category: 'Media', activate: true, content: { type: 'image' } });
-    editor.BlockManager.add('video', { label: 'Video', category: 'Media', content: { type: 'video', src: 'https://www.youtube.com/embed/dQw4w9WgXcQ' } });
-    // HTML and CSS are the source of truth after ZIP/code imports. Older saved
-    // project_data can contain a stale, partially rendered canvas, so use it only
-    // when the site has no stored HTML/CSS yet.
-    if (loadedSite.html || loadedSite.css) {
-      editor.setComponents(loadedSite.html || '');
-      editor.setStyle(loadedSite.css || '');
-    } else if (loadedSite.project_data && Object.keys(loadedSite.project_data).length) {
-      editor.loadProjectData(loadedSite.project_data as never);
-    } else {
-      editor.setComponents('<main><h1>Start editing</h1></main>');
-      editor.setStyle('');
-    }
-    editor.on('update', queueSave);
-    editor.on('component:selected', (component: any) => setSelectedElement(selectedComponentName(component)));
-    editor.on('component:deselected', () => setSelectedElement('Nothing selected'));
-    editor.on('load', () => {
-      window.setTimeout(() => {
-        prepareEditorCanvas(editor);
-        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
-      }, 120);
-    });
-    editor.on('canvas:frame:load', () => {
-      window.setTimeout(() => {
-        prepareEditorCanvas(editor);
-        runEditorJavascript(editor, javascriptRef.current, liveCanvas);
-      }, 120);
-    });
-
-    // Remove GrapesJS's built-in HTML/CSS-only code viewer so users always use
-    // CanvasForge's HTML/CSS/JavaScript editor instead.
-    editor.Panels.getPanels().forEach((panel: any) => {
-      const buttons = panel.get('buttons');
-    
-      buttons?.models
-        .filter(
-          (button: any) =>
-            button.get('command') === 'export-template' ||
-            button.get('id') === 'export-template'
-        )
-        .forEach((button: any) => {
-          buttons.remove(button);
-        });
-    });
-
-    editorRef.current = editor;
-    setEditorReady(true);
-  }
-
-  function setEditorDevice(device: 'desktop' | 'tablet' | 'mobile') {
-    const editor = editorRef.current;
-    if (!editor) return;
-    editor.setDevice(device);
-    setActiveDevice(device);
-  }
-
-  function undoEditor() {
-    editorRef.current?.UndoManager.undo();
-  }
-
-  function redoEditor() {
-    editorRef.current?.UndoManager.redo();
-  }
-
-  function toggleLiveCanvas() {
-    const next = !liveCanvas;
-    setLiveCanvas(next);
-    if (editorRef.current) window.setTimeout(() => runEditorJavascript(editorRef.current!, javascriptRef.current, next), 50);
-  }
-
-  function editSelectedText() {
-    const editor = editorRef.current;
-    const selected = editor?.getSelected();
-    if (!editor || !selected) {
-      setError('Select a heading, paragraph, button, or other text element first.');
-      return;
-    }
-
-    const tag = String(selected.get('tagName') || '').toLowerCase();
-    if (['img', 'video', 'iframe', 'input', 'textarea', 'select', 'form'].includes(tag)) {
-      setError('That element does not contain editable text.');
-      return;
-    }
-
-    const element = selected.getEl() as HTMLElement | undefined;
-    const existing = element?.innerText ?? String(selected.get('content') || '');
-    const next = window.prompt('Edit text', existing);
-    if (next === null) return;
-
-    // This intentionally replaces the selected element's inner content. It is
-    // ideal for headings, paragraphs, links, and buttons.
-    selected.components(next);
-    editor.select(selected);
-    queueSave();
-  }
-
-  function queueSave() {
+  function markChanged() {
     setSaveState('unsaved');
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => void saveSite(), 900);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void saveSite(), 1000);
   }
 
-  async function saveSite(nameOverride?: string) {
-    const editor = editorRef.current;
-    const current = siteRef.current;
-    if (!editor || !current) return;
+  async function saveSite() {
+    if (!site) return;
     setSaveState('saving');
-    try {
-      const payload = {
-        name: (nameOverride ?? current.name).trim() || 'Untitled website',
-        html: editor.getHtml(), css: editor.getCss(), javascript: javascriptRef.current,
-        project_data: editor.getProjectData(), updated_at: new Date().toISOString()
-      };
-      const { error: updateError } = await getSupabase().from('sites').update(payload).eq('id', current.id);
-      if (updateError) throw updateError;
-      const updated = { ...current, ...payload } as Site;
-      siteRef.current = updated; setSite(updated); setSaveState('saved');
-    } catch (caught) { setSaveState('error'); setError(caught instanceof Error ? caught.message : 'Save failed.'); }
-  }
-
-  function updateName(value: string) {
-    if (siteRef.current) siteRef.current = { ...siteRef.current, name: value };
-    setSite((current) => current ? { ...current, name: value } : current);
-    queueSave();
-  }
-
-  function openCodeModal() {
-    const editor = editorRef.current;
-    setImportTab('separate');
-    setCodeTab('html');
-    setImportHtml(editor?.getHtml() || siteRef.current?.html || '');
-    setImportCss(editor?.getCss() || siteRef.current?.css || '');
-    setImportJs(javascriptRef.current);
-    setShowImport(true);
-  }
-
-  function openJavascriptModal() {
-    const editor = editorRef.current;
-    setImportTab('separate');
-    setCodeTab('javascript');
-    setImportHtml(editor?.getHtml() || siteRef.current?.html || '');
-    setImportCss(editor?.getCss() || siteRef.current?.css || '');
-    setImportJs(javascriptRef.current);
-    setShowImport(true);
-  }
-
-  function applyImport() {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const parsed = importTab === 'bundle' ? splitFullHtml(importBundle) : { html: importHtml, css: importCss, javascript: importJs };
-    editor.setComponents(parsed.html || '<main><h1>Start editing</h1></main>');
-    editor.setStyle(parsed.css || '');
-    javascriptRef.current = parsed.javascript || '';
-    setJavascript(parsed.javascript || '');
-    setShowImport(false); queueSave();
-    window.setTimeout(() => runEditorJavascript(editor, parsed.javascript || '', liveCanvas), 100);
-  }
-
-async function uploadAsset(file: File, pathHint?: string) {
-  const current = siteRef.current;
-  if (!current) throw new Error('Website not loaded.');
-
-  const supabase = getSupabase();
-  const { data: authData } = await supabase.auth.getUser();
-
-  if (!authData.user) {
-    throw new Error('Your session has expired.');
-  }
-
-  const cleanName = (pathHint || file.name)
-    .replace(/[^a-zA-Z0-9._/-]/g, '-')
-    .replace(/\.\./g, '');
-
-  const fileName = cleanName.split('/').pop() || file.name;
-
-  const path =
-    `${authData.user.id}/${current.id}/${crypto.randomUUID()}-${fileName}`;
-
-  const contentType =
-    getMimeType(pathHint || file.name);
-
-  const { error: uploadError } = await supabase.storage
-    .from('site-assets')
-    .upload(path, file, {
-      cacheControl: '31536000',
-      contentType,
-      upsert: true
-    });
-
-  if (uploadError) {
-    throw new Error(
-      `Could not upload ${pathHint || file.name}: ${uploadError.message}`
-    );
-  }
-
-  return supabase.storage
-    .from('site-assets')
-    .getPublicUrl(path).data.publicUrl;
-}
-
-  async function uploadImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setUploadingImage(true);
     setError('');
     try {
-      if (!file.type.startsWith('image/') || file.size > 8 * 1024 * 1024) throw new Error('Choose an image no larger than 8 MB.');
-      const url = await uploadAsset(file);
-      const editor = editorRef.current;
-      if (!editor) throw new Error('The editor is not ready yet.');
-
-      editor.AssetManager.add({ src: url, name: file.name });
-      const selected = editor.getSelected();
-      const selectedType = String(selected?.get('type') || '');
-      const selectedTag = String(selected?.get('tagName') || '').toLowerCase();
-
-      if (selected && (selectedType === 'image' || selectedTag === 'img')) {
-        selected.addAttributes({ src: url, alt: selected.getAttributes().alt || file.name.replace(/\.[^.]+$/, '') });
-        editor.select(selected);
-      } else {
-        const image = editor.addComponents({
-          type: 'image',
-          attributes: { src: url, alt: file.name.replace(/\.[^.]+$/, '') },
-          style: { 'max-width': '100%', height: 'auto', display: 'block' }
-        })[0];
-        if (image) editor.select(image);
-      }
-
-      queueSave();
+      const payload = {
+        html,
+        css,
+        javascript,
+        project_data: null,
+        updated_at: new Date().toISOString()
+      };
+      const { error: updateError } = await getSupabase()
+        .from('sites')
+        .update(payload)
+        .eq('id', site.id);
+      if (updateError) throw updateError;
+      setSite({ ...site, ...payload });
+      setSaveState('saved');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Image upload failed.');
-    } finally {
-      setUploadingImage(false);
-      event.target.value = '';
+      setSaveState('error');
+      setError(caught instanceof Error ? caught.message : 'Save failed.');
     }
+  }
+
+  function updateHtml(value: string) {
+    setHtml(value);
+    markChanged();
+  }
+
+  function updateCss(value: string) {
+    setCss(value);
+    markChanged();
+  }
+
+  function updateJavascript(value: string) {
+    setJavascript(value);
+    markChanged();
+  }
+
+  async function uploadAsset(file: File, pathHint: string) {
+    if (!site) throw new Error('Website not loaded.');
+    const supabase = getSupabase();
+    const { data: authData } = await supabase.auth.getUser();
+    if (!authData.user) throw new Error('Your session has expired.');
+
+    const cleanName = normalizePath(pathHint).replace(/[^a-zA-Z0-9._/-]/g, '-');
+    const filename = cleanName.split('/').pop() || file.name;
+    const storagePath = `${authData.user.id}/${site.id}/${crypto.randomUUID()}-${filename}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('site-assets')
+      .upload(storagePath, file, {
+        cacheControl: '31536000',
+        contentType: getMimeType(pathHint),
+        upsert: true
+      });
+    if (uploadError) throw new Error(`Could not upload ${pathHint}: ${uploadError.message}`);
+
+    return supabase.storage.from('site-assets').getPublicUrl(storagePath).data.publicUrl;
   }
 
   async function importZip(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-
-    setImportingZip(true);
+    setImporting(true);
     setError('');
 
     try {
@@ -596,177 +350,257 @@ async function uploadAsset(file: File, pathHint?: string) {
       const files = (Object.values(zip.files) as JSZipObject[]).filter(
         (entry) => !entry.dir && !entry.name.includes('__MACOSX')
       );
-
       const htmlEntry =
         files.find((entry) => /(^|\/)index\.html?$/i.test(entry.name)) ||
         files.find((entry) => /\.html?$/i.test(entry.name));
+      if (!htmlEntry) throw new Error('The ZIP must contain index.html.');
 
-      if (!htmlEntry) throw new Error('The ZIP must include index.html.');
+      let importedHtml = await htmlEntry.async('text');
+      const replacements = new Map<string, string>();
 
-      const siteRoot = zipDirectory(htmlEntry.name);
-      let source = await htmlEntry.async('text');
-      const assetMap = new Map<string, string>();
-
-      // Upload every non-code website asset and preserve its original ZIP path.
-      const uploadable = files.filter((entry) =>
-        !/\.(?:html?|css|js|mjs|cjs|map|md|txt)$/i.test(entry.name)
-      );
-
-      for (const entry of uploadable) {
+      for (const entry of files) {
+        if (entry === htmlEntry || /\.(css|js|mjs|html?)$/i.test(entry.name)) continue;
         const blob = await entry.async('blob');
-        const filename = entry.name.split('/').pop() || 'asset';
-        const typedFile = new File([blob], filename, {
-          type: getMimeType(entry.name)
-        });
-        const url = await uploadAsset(typedFile, entry.name);
-        assetMap.set(normalizeAssetPath(entry.name), url);
+        const uploadedFile = new File(
+          [blob],
+          entry.name.split('/').pop() || 'asset',
+          { type: getMimeType(entry.name) }
+        );
+        const url = await uploadAsset(uploadedFile, entry.name);
+        replacements.set(normalizePath(entry.name), url);
+
+        const relativeToHtml = resolveRelativePath(htmlEntry.name, entry.name);
+        replacements.set(relativeToHtml, url);
       }
 
-      // Determine the specific CSS and JavaScript files linked by index.html.
-      const documentNode = new DOMParser().parseFromString(source, 'text/html');
-      const allStylesheetRefs = Array.from(
-        documentNode.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]')
-      )
-        .map((node) => node.getAttribute('href') || '')
-        .filter(Boolean);
+      importedHtml = replaceReferences(importedHtml, replacements);
 
-      const stylesheetRefs = allStylesheetRefs.filter(
-        (href) => !/^(?:https?:|\/\/|data:)/i.test(href)
-      );
-      const externalStylesheetRefs = allStylesheetRefs.filter((href) =>
-        /^(?:https?:|\/\/)/i.test(href)
-      );
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(importedHtml, 'text/html');
+      const cssParts: string[] = [];
+      const jsParts: string[] = [];
 
-      const scriptRefs = Array.from(
-        documentNode.querySelectorAll<HTMLScriptElement>('script[src]')
-      )
-        .map((node) => node.getAttribute('src') || '')
-        .filter((src) => src && !/^(?:https?:|\/\/|data:)/i.test(src));
-
-      source = replaceAssetReferences(source, assetMap, siteRoot);
-      const parsed = splitFullHtml(source);
-      const cssParts: string[] = [
-        ...externalStylesheetRefs.map((href) => `@import url("${href}");`),
-        parsed.css
-      ];
-      const jsParts: string[] = [parsed.javascript];
-
-      for (const href of stylesheetRefs) {
-        const entry = findZipEntry(files, siteRoot, href);
-        if (!entry) throw new Error(`The stylesheet ${href} was not found in the ZIP.`);
-        const css = await entry.async('text');
-        cssParts.push(replaceAssetReferences(css, assetMap, siteRoot));
+      for (const style of Array.from(doc.querySelectorAll('style'))) {
+        cssParts.push(replaceReferences(style.textContent || '', replacements));
+        style.remove();
       }
 
-      for (const src of scriptRefs) {
-        const entry = findZipEntry(files, siteRoot, src);
-        if (!entry) throw new Error(`The script ${src} was not found in the ZIP.`);
-        jsParts.push(await entry.async('text'));
-      }
-
-      // Fallback for exports that omit link/script tags but still include one CSS/JS file.
-      if (stylesheetRefs.length === 0) {
-        for (const entry of files.filter((item) => /\.css$/i.test(item.name))) {
-          cssParts.push(
-            replaceAssetReferences(await entry.async('text'), assetMap, siteRoot)
-          );
-        }
-      }
-      if (scriptRefs.length === 0) {
-        for (const entry of files.filter((item) => /\.(?:js|mjs)$/i.test(item.name))) {
-          jsParts.push(await entry.async('text'));
+      for (const link of Array.from(doc.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]'))) {
+        const href = link.getAttribute('href') || '';
+        if (/^https?:\/\//i.test(href)) continue;
+        const resolved = resolveRelativePath(htmlEntry.name, href);
+        const cssEntry = files.find((entry) => normalizePath(entry.name) === resolved);
+        if (cssEntry) {
+          cssParts.push(replaceReferences(await cssEntry.async('text'), replacements));
+          link.remove();
         }
       }
 
-      const editor = editorRef.current;
-      if (!editor) throw new Error('The editor is not ready yet.');
-
-      editor.setComponents(parsed.html || '<main><h1>Start editing</h1></main>');
-      editor.setStyle(cssParts.filter(Boolean).join('\n'));
-      javascriptRef.current = jsParts.filter(Boolean).join('\n');
-      setJavascript(javascriptRef.current);
-
-      // Make uploaded assets available in GrapesJS's asset picker as well.
-      for (const [originalPath, url] of assetMap) {
-        editor.AssetManager.add({
-          src: url,
-          name: originalPath.split('/').pop() || originalPath
-        });
+      for (const script of Array.from(doc.querySelectorAll<HTMLScriptElement>('script'))) {
+        const src = script.getAttribute('src');
+        if (src && !/^https?:\/\//i.test(src)) {
+          const resolved = resolveRelativePath(htmlEntry.name, src);
+          const scriptEntry = files.find((entry) => normalizePath(entry.name) === resolved);
+          if (scriptEntry) {
+            jsParts.push(await scriptEntry.async('text'));
+            script.remove();
+          }
+        } else if (!src && script.textContent) {
+          jsParts.push(script.textContent);
+          script.remove();
+        }
       }
 
-      queueSave();
+      const completeHtml = `<!doctype html>\n${doc.documentElement.outerHTML}`;
+      setHtml(completeHtml);
+      setCss(cssParts.join('\n\n'));
+      setJavascript(jsParts.join('\n\n'));
+      setTab('html');
+      setSaveState('unsaved');
+      setTimeout(() => void saveSite(), 0);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'ZIP import failed.');
     } finally {
-      setImportingZip(false);
+      setImporting(false);
       event.target.value = '';
     }
   }
 
-  async function updatePublishing(publish: boolean) {
-    const current = siteRef.current;
-    if (!current) return;
-    const slug = publishSlug.toLowerCase().trim().replace(/[^a-z0-9-]+/g, '-').replace(/(^-|-$)/g, '');
-    if (!slug) return setError('Enter a valid subdomain name.');
-    if (formEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formEmail)) return setError('Enter a valid form recipient email.');
-    setPublishing(true); setError('');
-    try {
-      await saveSite();
-      const payload = { slug, form_email: formEmail.trim() || null, is_published: publish, published_at: publish ? new Date().toISOString() : null };
-      const { error: updateError } = await getSupabase().from('sites').update(payload).eq('id', current.id);
-      if (updateError) throw updateError;
-      const updated = { ...siteRef.current!, ...payload } as Site;
-      siteRef.current = updated; setSite(updated); setPublishSlug(slug); setShowPublish(false);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Publishing failed. That subdomain may already be in use.'); }
-    finally { setPublishing(false); }
+  function addContactForm() {
+    setHtml((current) => insertBeforeBodyEnd(current, CONTACT_FORM_HTML));
+    setCss((current) => `${current}\n\n${CONTACT_FORM_CSS}`);
+    setTab('html');
+    markChanged();
   }
 
-  const previewSrc = useMemo(() => previewDocument(editorRef.current?.getHtml() || site?.html || '', editorRef.current?.getCss() || site?.css || '', javascript, runScripts), [showPreview, runScripts, javascript, site]);
-  const publicBaseUrl = process.env.NEXT_PUBLIC_PUBLIC_BASE_URL || 'https://canvasforge-starter.vercel.app/published';
-  const publicUrl = site ? `${publicBaseUrl.replace(/\/$/, '')}/${site.slug}` : '';
-  const statusText = !editorReady ? 'Loading editor…' : saveState === 'saving' ? 'Saving…' : saveState === 'unsaved' ? 'Unsaved changes' : saveState === 'error' ? 'Save failed' : 'Saved';
+  function addGoogleFont() {
+    const family = fontFamily.trim();
+    if (!family) return;
+    const encoded = family.replace(/ /g, '+');
+    const importLine = `@import url('https://fonts.googleapis.com/css2?family=${encoded}:wght@300;400;500;600;700;800;900&display=swap');`;
+    const bodyRule = `\nbody { font-family: '${family}', sans-serif; }`;
+    setCss((current) => `${importLine}\n${current}${bodyRule}`);
+    setTab('css');
+    markChanged();
+  }
 
-  if (loading) return <div className="loading-screen"><div><div className="spinner"/><p>Opening editor…</p></div></div>;
-  if (!site) return <div className="loading-screen"><div>{error || 'Website not found.'}<br/><Link href="/dashboard">Return to dashboard</Link></div></div>;
+  function addCustomFont() {
+    const url = customFontUrl.trim();
+    const family = customFontFamily.trim();
+    if (!url || !family) {
+      setError('Enter both a font stylesheet URL and the font-family name.');
+      return;
+    }
+    const importLine = `@import url('${url.replace(/'/g, '%27')}');`;
+    setCss((current) => `${importLine}\n${current}\nbody { font-family: '${family}', sans-serif; }`);
+    setTab('css');
+    markChanged();
+  }
 
-  return <div className="editor-shell">
-    <header className="editor-bar">
-      <div className="editor-left"><Link className="button-ghost button-small" style={{color:'white'}} href="/dashboard">← Dashboard</Link><input className="editor-name" value={site.name} onChange={(e)=>updateName(e.target.value)} maxLength={80}/><span className="save-status">{statusText}</span></div>
-      <div className="editor-right">
-        <input ref={fileRef} type="file" accept="image/*" hidden onChange={uploadImage}/><input ref={zipRef} type="file" accept=".zip,application/zip" hidden onChange={importZip}/>
-        <button className="button-ghost button-small hide-mobile" style={{color:'white'}} disabled={uploadingImage} title="Select an image on the page to replace it, or upload with nothing selected to add a new image" onClick={()=>fileRef.current?.click()}>{uploadingImage?'Uploading…':'Add / replace photo'}</button>
-        <button className="button-ghost button-small" style={{color:'white'}} disabled={importingZip} onClick={()=>zipRef.current?.click()}>{importingZip?'Importing…':'Import ZIP'}</button>
-        <button className="button-ghost button-small" style={{color:'white'}} onClick={openCodeModal}>HTML / CSS</button>
-        <button className="button-ghost button-small" style={{color:'white'}} onClick={openJavascriptModal}>JavaScript</button>
-        <button className="button-ghost button-small" style={{color:'white'}} onClick={()=>setShowPreview(true)}>Preview</button>
-        <button className="button-secondary button-small" onClick={()=>setShowPublish(true)}>{site.is_published?'Publishing settings':'Publish'}</button>
-        <button className="button-primary button-small" onClick={()=>saveSite()}>Save</button>
-      </div>
-    </header>
-    {error && <div className="message-error floating-error" onClick={()=>setError('')}>{error}</div>}
-    <div className="editor-workspace-bar">
-      <div className="editor-workspace-group">
-        <button className="workspace-icon-button" type="button" onClick={undoEditor} title="Undo">↶</button>
-        <button className="workspace-icon-button" type="button" onClick={redoEditor} title="Redo">↷</button>
-        <span className="workspace-divider" />
-        <button className="workspace-device-button" type="button" onClick={editSelectedText}>Edit text</button>
-        <span className="workspace-divider" />
-        <button className={`workspace-device-button ${activeDevice==='desktop'?'active':''}`} type="button" onClick={()=>setEditorDevice('desktop')}>Desktop</button>
-        <button className={`workspace-device-button ${activeDevice==='tablet'?'active':''}`} type="button" onClick={()=>setEditorDevice('tablet')}>Tablet</button>
-        <button className={`workspace-device-button ${activeDevice==='mobile'?'active':''}`} type="button" onClick={()=>setEditorDevice('mobile')}>Mobile</button>
-      </div>
-      <div className="editor-selection-status"><strong>Selected:</strong> {selectedElement}</div>
-      <button className={`workspace-live-button ${liveCanvas?'active':''}`} type="button" onClick={toggleLiveCanvas} title="Show menus, sliders, animations, and other JavaScript directly in the editor">
-        {liveCanvas ? 'Interactions on' : 'Interactions off'}
-      </button>
+  async function updatePublishing(publish: boolean) {
+    if (!site) return;
+    const slug = sanitizeSlug(publishSlug);
+    if (!slug) return setError('Enter a valid published-site name.');
+    if (formEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formEmail)) {
+      return setError('Enter a valid form recipient email.');
+    }
+
+    setPublishing(true);
+    setError('');
+    try {
+      await saveSite();
+      const payload = {
+        slug,
+        form_email: formEmail.trim() || null,
+        is_published: publish,
+        published_at: publish ? new Date().toISOString() : null
+      };
+      const { error: updateError } = await getSupabase()
+        .from('sites')
+        .update(payload)
+        .eq('id', site.id);
+      if (updateError) throw updateError;
+      setSite({ ...site, ...payload });
+      setPublishSlug(slug);
+      setShowPublish(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Publishing failed.');
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  const status =
+    saveState === 'saving'
+      ? 'Saving…'
+      : saveState === 'unsaved'
+        ? 'Unsaved changes'
+        : saveState === 'error'
+          ? 'Save failed'
+          : 'Saved';
+
+  if (loading) {
+    return <div className="loading-screen"><div><div className="spinner"/><p>Opening code editor…</p></div></div>;
+  }
+
+  if (!site) {
+    return <div className="loading-screen"><div>{error || 'Website not found.'}<br/><Link href="/dashboard">Return to dashboard</Link></div></div>;
+  }
+
+  return (
+    <div className="code-builder-shell">
+      <header className="code-builder-header">
+        <div className="code-builder-brand">
+          <Link href="/dashboard" className="button-ghost button-small" style={{ color: 'white' }}>← Dashboard</Link>
+          <strong>{site.name}</strong>
+          <span className="save-status">{status}</span>
+        </div>
+        <div className="code-builder-actions">
+          <input ref={zipInput} type="file" accept=".zip,application/zip" hidden onChange={importZip}/>
+          <button className="button-ghost button-small" style={{ color: 'white' }} onClick={() => zipInput.current?.click()} disabled={importing}>{importing ? 'Importing…' : 'Import ZIP'}</button>
+          <button className="button-ghost button-small" style={{ color: 'white' }} onClick={addContactForm}>+ Contact form</button>
+          <button className="button-secondary button-small" onClick={() => setShowPublish(true)}>{site.is_published ? 'Publishing settings' : 'Publish'}</button>
+          <button className="button-primary button-small" onClick={() => void saveSite()}>Save</button>
+        </div>
+      </header>
+
+      {error && <div className="message-error code-builder-error" onClick={() => setError('')}>{error}</div>}
+
+      <section className="code-builder-main">
+        <aside className="code-builder-sidebar">
+          <h3>Code</h3>
+          <button className={tab === 'html' ? 'code-side-tab active' : 'code-side-tab'} onClick={() => setTab('html')}>HTML</button>
+          <button className={tab === 'css' ? 'code-side-tab active' : 'code-side-tab'} onClick={() => setTab('css')}>CSS</button>
+          <button className={tab === 'javascript' ? 'code-side-tab active' : 'code-side-tab'} onClick={() => setTab('javascript')}>JavaScript</button>
+
+          <div className="code-tool-section">
+            <h3>Fonts</h3>
+            <label>Online font</label>
+            <select className="input" value={fontFamily} onChange={(event) => setFontFamily(event.target.value)}>
+              {COMMON_FONTS.map((font) => <option key={font}>{font}</option>)}
+            </select>
+            <button className="button-secondary button-small" onClick={addGoogleFont}>Add font</button>
+            <p className="code-help">For any font not listed, paste its stylesheet URL and exact font-family name.</p>
+            <input className="input" value={customFontUrl} onChange={(event) => setCustomFontUrl(event.target.value)} placeholder="https://fonts.example.com/font.css"/>
+            <input className="input" value={customFontFamily} onChange={(event) => setCustomFontFamily(event.target.value)} placeholder="Font family name"/>
+            <button className="button-secondary button-small" onClick={addCustomFont}>Add custom font</button>
+          </div>
+        </aside>
+
+        <div className="code-builder-editor">
+          <div className="code-editor-titlebar">
+            <strong>{tab === 'html' ? 'index.html' : tab === 'css' ? 'styles.css' : 'script.js'}</strong>
+            <span>Paste or edit code. Preview updates immediately.</span>
+          </div>
+          {tab === 'html' && <textarea className="code-builder-textarea" value={html} onChange={(event) => updateHtml(event.target.value)} spellCheck={false}/>} 
+          {tab === 'css' && <textarea className="code-builder-textarea" value={css} onChange={(event) => updateCss(event.target.value)} spellCheck={false}/>} 
+          {tab === 'javascript' && <textarea className="code-builder-textarea" value={javascript} onChange={(event) => updateJavascript(event.target.value)} spellCheck={false}/>} 
+        </div>
+
+        <div className="code-builder-preview">
+          <div className="code-editor-titlebar">
+            <strong>Live preview</strong>
+            {site.is_published && <a href={publicUrl} target="_blank" rel="noreferrer">Open live site ↗</a>}
+          </div>
+          <iframe
+            title="Live website preview"
+            className="code-preview-frame"
+            sandbox="allow-scripts allow-forms allow-modals allow-popups allow-same-origin"
+            srcDoc={previewDocument}
+          />
+        </div>
+      </section>
+
+      {showPublish && (
+        <div className="modal-backdrop">
+          <div className="modal publish-modal">
+            <div className="modal-header">
+              <h2>Publish website</h2>
+              <button className="button-ghost" onClick={() => setShowPublish(false)}>✕</button>
+            </div>
+            <div className="modal-body form-stack">
+              <div className="field">
+                <label>Published website address</label>
+                <div className="published-path-field">
+                  <span>{publicBaseUrl.replace(/\/$/, '')}/</span>
+                  <input className="input" value={publishSlug} onChange={(event) => setPublishSlug(event.target.value)}/>
+                </div>
+              </div>
+              <div className="field">
+                <label>Send website form submissions to</label>
+                <input type="email" className="input" value={formEmail} onChange={(event) => setFormEmail(event.target.value)} placeholder="you@example.com"/>
+                <small>The contact-form block and other normal HTML forms send to this address.</small>
+              </div>
+              {site.is_published && <div className="message-success">Live at <a href={publicUrl} target="_blank" rel="noreferrer">{publicUrl}</a></div>}
+            </div>
+            <div className="modal-footer">
+              {site.is_published && <button className="button-danger" disabled={publishing} onClick={() => void updatePublishing(false)}>Unpublish</button>}
+              <button className="button-secondary" onClick={() => setShowPublish(false)}>Cancel</button>
+              <button className="button-primary" disabled={publishing} onClick={() => void updatePublishing(true)}>{publishing ? 'Publishing…' : 'Save and publish'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
-    <div className="editor-help-strip">Click an element to select it. Double-click text to edit. Select an image, then choose <strong>Add / replace photo</strong>. The finished styling and images display in the editor. Double-click text or select it and click Edit text. Turn Interactions on only when testing menus, sliders, or animations.</div>
-    <main className="editor-main"><div id="gjs" /></main>
-
-    {showImport && <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Edit or import code</h2><button className="button-ghost" onClick={()=>setShowImport(false)}>✕</button></div><div className="modal-body"><div className="tabs"><button className={`tab ${importTab==='bundle'?'active':''}`} onClick={()=>setImportTab('bundle')}>Full HTML</button><button className={`tab ${importTab==='separate'?'active':''}`} onClick={()=>setImportTab('separate')}>Separate files</button></div>{importTab==='bundle'?<div className="field"><label>Paste complete HTML</label><textarea className="textarea tall" value={importBundle} onChange={(e)=>setImportBundle(e.target.value)}/><small>Inline &lt;script&gt; code is imported automatically. For sites with local image folders, use Import ZIP instead.</small></div>:<div className="field"><div className="tabs code-tabs"><button className={`tab ${codeTab==='html'?'active':''}`} onClick={()=>setCodeTab('html')}>HTML</button><button className={`tab ${codeTab==='css'?'active':''}`} onClick={()=>setCodeTab('css')}>CSS</button><button className={`tab ${codeTab==='javascript'?'active':''}`} onClick={()=>setCodeTab('javascript')}>JavaScript</button></div>{codeTab==='html'&&<textarea aria-label="HTML code" className="textarea code-editor-textarea" value={importHtml} onChange={(e)=>setImportHtml(e.target.value)} spellCheck={false}/>} {codeTab==='css'&&<textarea aria-label="CSS code" className="textarea code-editor-textarea" value={importCss} onChange={(e)=>setImportCss(e.target.value)} spellCheck={false}/>} {codeTab==='javascript'&&<><textarea aria-label="JavaScript code" className="textarea code-editor-textarea" value={importJs} onChange={(e)=>setImportJs(e.target.value)} spellCheck={false} placeholder="// Add your JavaScript here"/><small>JavaScript is saved with the site and now runs directly in the editor when “Interactions on” is enabled. It also runs on the published site.</small></>}</div>}</div><div className="modal-footer"><button className="button-secondary" onClick={()=>setShowImport(false)}>Cancel</button><button className="button-primary" onClick={applyImport}>Apply code</button></div></div></div>}
-
-    {showPreview && <div className="modal-backdrop"><div className="modal large"><div className="modal-header"><h2>Preview</h2><button className="button-ghost" onClick={()=>setShowPreview(false)}>✕</button></div><div className="modal-body"><label className="checkbox-row"><input type="checkbox" checked={runScripts} onChange={(e)=>setRunScripts(e.target.checked)}/>Run custom JavaScript</label><iframe className="preview-frame" title="Website preview" sandbox={runScripts?'allow-scripts allow-forms allow-popups':''} srcDoc={previewSrc}/></div></div></div>}
-
-    {showPublish && <div className="modal-backdrop"><div className="modal publish-modal"><div className="modal-header"><h2>Publish website</h2><button className="button-ghost" onClick={()=>setShowPublish(false)}>✕</button></div><div className="modal-body form-stack"><div className="field"><label>Published website address</label><div className="domain-field"><span>{publicBaseUrl.replace(/\/$/, '')}/</span><input className="input" value={publishSlug} onChange={(e)=>setPublishSlug(e.target.value)}/></div></div><div className="field"><label>Send all website forms to</label><input type="email" className="input" value={formEmail} onChange={(e)=>setFormEmail(e.target.value)} placeholder="you@example.com"/><small>Any normal HTML &lt;form&gt; on the published site will send here.</small></div>{site.is_published&&<div className="message-success">Live at <a href={publicUrl} target="_blank" rel="noreferrer">{publicUrl}</a></div>}</div><div className="modal-footer">{site.is_published&&<button className="button-danger" disabled={publishing} onClick={()=>updatePublishing(false)}>Unpublish</button>}<button className="button-secondary" onClick={()=>setShowPublish(false)}>Cancel</button><button className="button-primary" disabled={publishing} onClick={()=>updatePublishing(true)}>{publishing?'Publishing…':'Save and publish'}</button></div></div></div>}
-  </div>;
+  );
 }
