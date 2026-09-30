@@ -261,7 +261,7 @@ export async function POST(
     );
   }
 
-  const userId = userId;
+  const userId: string = authData.user.id;
 
   let input: {
     url?: string;
