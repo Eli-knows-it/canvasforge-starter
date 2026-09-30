@@ -15,6 +15,18 @@ import {
 import { getSupabase } from '@/lib/supabase';
 import type { Site } from '@/lib/types';
 
+type CreateMode = 'blank' | 'url' | null;
+
+type ImportedPage = {
+  title?: string;
+  sourceUrl: string;
+  html: string;
+  css: string;
+  javascript: string;
+  importedAssets?: number;
+  error?: string;
+};
+
 function makeSlug(name: string): string {
   return (
     name
@@ -43,6 +55,9 @@ export function DashboardClient() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [siteName, setSiteName] = useState('');
+  const [createMode, setCreateMode] = useState<CreateMode>(null);
+  const [importUrl, setImportUrl] = useState('');
+  const [importMessage, setImportMessage] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
@@ -91,6 +106,24 @@ export function DashboardClient() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function openCreate() {
+    setShowCreate(true);
+    setCreateMode(null);
+    setSiteName('');
+    setImportUrl('');
+    setImportMessage('');
+    setError('');
+  }
+
+  function closeCreate() {
+    if (creating) return;
+    setShowCreate(false);
+    setCreateMode(null);
+    setSiteName('');
+    setImportUrl('');
+    setImportMessage('');
   }
 
   async function createSite(
@@ -155,6 +188,126 @@ export function DashboardClient() {
         caught instanceof Error
           ? caught.message
           : 'Unable to create website.'
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function importWebsite(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    const cleanUrl = importUrl.trim();
+
+    if (!cleanUrl) {
+      setError('Paste the website URL you want to import.');
+      return;
+    }
+
+    setCreating(true);
+    setError('');
+    setImportMessage(
+      'Reading the website and copying its layout, styles, and images…'
+    );
+
+    try {
+      const supabase = getSupabase();
+      const { data: sessionData } =
+        await supabase.auth.getSession();
+
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        throw new Error(
+          'Your session has expired. Please sign in again.'
+        );
+      }
+
+      const response = await fetch('/api/import-url', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ url: cleanUrl })
+      });
+
+      const imported =
+        (await response.json()) as ImportedPage;
+
+      if (!response.ok) {
+        throw new Error(
+          imported.error ||
+            'CanvasForge could not import that website.'
+        );
+      }
+
+      setImportMessage(
+        `Imported the page and copied ${imported.importedAssets || 0} assets. Creating the editable site…`
+      );
+
+      const inferredName = (() => {
+        if (siteName.trim()) return siteName.trim();
+        if (imported.title?.trim()) return imported.title.trim();
+
+        try {
+          return new URL(imported.sourceUrl || cleanUrl)
+            .hostname.replace(/^www\./, '')
+            .split('.')[0]
+            .replace(/[-_]+/g, ' ')
+            .replace(/\b\w/g, (letter) =>
+              letter.toUpperCase()
+            );
+        } catch {
+          return 'Imported website';
+        }
+      })();
+
+      const { data: authData } =
+        await supabase.auth.getUser();
+
+      if (!authData.user) {
+        throw new Error(
+          'Your session has expired. Please sign in again.'
+        );
+      }
+
+      const slug =
+        `${makeSlug(inferredName)}-` +
+        crypto.randomUUID().slice(0, 6);
+
+      const { data, error: insertError } =
+        await supabase
+          .from('sites')
+          .insert({
+            owner_id: authData.user.id,
+            name: inferredName.slice(0, 80),
+            slug,
+            html: imported.html,
+            css: imported.css,
+            javascript: imported.javascript,
+            project_data: null,
+            is_published: false,
+            published_at: null,
+            form_email: null
+          })
+          .select('*')
+          .single();
+
+      if (insertError) {
+        throw insertError;
+      }
+
+      closeCreate();
+      router.push(`/editor/${data.id}`);
+    } catch (caught) {
+      setImportMessage('');
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : 'Unable to import website.'
       );
     } finally {
       setCreating(false);
@@ -236,7 +389,7 @@ export function DashboardClient() {
           <button
             type="button"
             className="button-secondary button-small"
-            onClick={() => setShowCreate(true)}
+            onClick={openCreate}
           >
             + New website
           </button>
@@ -264,7 +417,7 @@ export function DashboardClient() {
           <button
             type="button"
             className="button-primary"
-            onClick={() => setShowCreate(true)}
+            onClick={openCreate}
           >
             Create website
           </button>
@@ -291,7 +444,7 @@ export function DashboardClient() {
               <button
                 type="button"
                 className="button-primary"
-                onClick={() => setShowCreate(true)}
+                onClick={openCreate}
               >
                 Create website
               </button>
@@ -378,67 +531,263 @@ export function DashboardClient() {
 
       {showCreate && (
         <div className="modal-backdrop">
-          <form
+          <div
             className="modal"
-            onSubmit={createSite}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-site-title"
           >
             <div className="modal-header">
-              <h2>Create a website</h2>
+              <h2 id="create-site-title">
+                Create a website
+              </h2>
 
               <button
                 type="button"
                 className="button-ghost"
                 aria-label="Close"
-                onClick={() =>
-                  setShowCreate(false)
-                }
+                onClick={closeCreate}
+                disabled={creating}
               >
                 ×
               </button>
             </div>
 
             <div className="modal-body">
-              <div className="field">
-                <label htmlFor="site-name">
-                  Website name
-                </label>
+              {!createMode && (
+                <div
+                  style={{
+                    display: 'grid',
+                    gap: 14
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    style={{
+                      textAlign: 'left',
+                      padding: 20
+                    }}
+                    onClick={() =>
+                      setCreateMode('blank')
+                    }
+                  >
+                    <strong
+                      style={{
+                        display: 'block',
+                        fontSize: '1.05rem',
+                        marginBottom: 5
+                      }}
+                    >
+                      Start from scratch
+                    </strong>
+                    <span>
+                      Create a fresh CanvasForge
+                      website and build it visually.
+                    </span>
+                  </button>
 
-                <input
-                  id="site-name"
-                  className="input"
-                  value={siteName}
-                  onChange={(event) =>
-                    setSiteName(event.target.value)
-                  }
-                  placeholder="My new website"
-                  required
-                  autoFocus
-                />
-              </div>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    style={{
+                      textAlign: 'left',
+                      padding: 20
+                    }}
+                    onClick={() =>
+                      setCreateMode('url')
+                    }
+                  >
+                    <strong
+                      style={{
+                        display: 'block',
+                        fontSize: '1.05rem',
+                        marginBottom: 5
+                      }}
+                    >
+                      Import from URL
+                    </strong>
+                    <span>
+                      Copy a page you own into
+                      CanvasForge and make it editable.
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {createMode === 'blank' && (
+                <form
+                  id="create-blank-site"
+                  onSubmit={createSite}
+                >
+                  <div className="field">
+                    <label htmlFor="site-name">
+                      Website name
+                    </label>
+
+                    <input
+                      id="site-name"
+                      className="input"
+                      value={siteName}
+                      onChange={(event) =>
+                        setSiteName(
+                          event.target.value
+                        )
+                      }
+                      placeholder="My new website"
+                      required
+                      autoFocus
+                    />
+                  </div>
+                </form>
+              )}
+
+              {createMode === 'url' && (
+                <form
+                  id="import-url-site"
+                  onSubmit={importWebsite}
+                >
+                  <div className="field">
+                    <label htmlFor="import-url">
+                      Website URL
+                    </label>
+
+                    <input
+                      id="import-url"
+                      className="input"
+                      type="url"
+                      value={importUrl}
+                      onChange={(event) =>
+                        setImportUrl(
+                          event.target.value
+                        )
+                      }
+                      placeholder="https://yourwebsite.com"
+                      required
+                      autoFocus
+                    />
+                  </div>
+
+                  <div
+                    className="field"
+                    style={{ marginTop: 14 }}
+                  >
+                    <label htmlFor="import-name">
+                      CanvasForge website name
+                      {' '}
+                      <span
+                        style={{
+                          fontWeight: 400
+                        }}
+                      >
+                        (optional)
+                      </span>
+                    </label>
+
+                    <input
+                      id="import-name"
+                      className="input"
+                      value={siteName}
+                      onChange={(event) =>
+                        setSiteName(
+                          event.target.value
+                        )
+                      }
+                      placeholder="Uses the page title if blank"
+                    />
+                  </div>
+
+                  <p
+                    style={{
+                      margin: '14px 0 0',
+                      lineHeight: 1.5,
+                      opacity: 0.72,
+                      fontSize: '.9rem'
+                    }}
+                  >
+                    Use this for pages you own or
+                    have permission to reproduce.
+                    Complex web apps may need some
+                    manual cleanup after import.
+                  </p>
+
+                  {importMessage && (
+                    <p
+                      style={{
+                        marginTop: 14,
+                        fontWeight: 700
+                      }}
+                    >
+                      {importMessage}
+                    </p>
+                  )}
+                </form>
+              )}
+
+              {error && (
+                <div
+                  className="message-error"
+                  role="alert"
+                  style={{ marginTop: 16 }}
+                >
+                  {error}
+                </div>
+              )}
             </div>
 
             <div className="modal-footer">
-              <button
-                type="button"
-                className="button-secondary"
-                onClick={() =>
-                  setShowCreate(false)
-                }
-              >
-                Cancel
-              </button>
+              {createMode ? (
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => {
+                    if (creating) return;
+                    setCreateMode(null);
+                    setError('');
+                    setImportMessage('');
+                  }}
+                  disabled={creating}
+                >
+                  Back
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={closeCreate}
+                  disabled={creating}
+                >
+                  Cancel
+                </button>
+              )}
 
-              <button
-                type="submit"
-                className="button-primary"
-                disabled={creating}
-              >
-                {creating
-                  ? 'Creating…'
-                  : 'Create and edit'}
-              </button>
+              {createMode === 'blank' && (
+                <button
+                  type="submit"
+                  form="create-blank-site"
+                  className="button-primary"
+                  disabled={creating}
+                >
+                  {creating
+                    ? 'Creating…'
+                    : 'Create and edit'}
+                </button>
+              )}
+
+              {createMode === 'url' && (
+                <button
+                  type="submit"
+                  form="import-url-site"
+                  className="button-primary"
+                  disabled={creating}
+                >
+                  {creating
+                    ? 'Importing…'
+                    : 'Import and edit'}
+                </button>
+              )}
             </div>
-          </form>
+          </div>
         </div>
       )}
     </div>
