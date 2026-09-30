@@ -261,6 +261,8 @@ export async function POST(
     );
   }
 
+  const userId = userId;
+
   let input: {
     url?: string;
   };
@@ -404,7 +406,7 @@ export async function POST(
           .slice(0, 20);
 
         const path =
-          `${authData.user.id}/imports/${Date.now()}-${hash}.${extensionFor(
+          `${userId}/imports/${Date.now()}-${hash}.${extensionFor(
             assetType,
             assetUrl.pathname
           )}`;
